@@ -1,0 +1,1248 @@
+syntax = "proto3";
+
+package makechain;
+
+// ============================================================
+// ENVELOPE
+// ============================================================
+
+message Message {
+  MessageData data       = 1;
+  bytes hash             = 2;  // BLAKE3(data), 32 bytes
+  bytes signature        = 3;  // Ed25519 signature over hash, 64 bytes
+  bytes signer           = 4;  // Ed25519 public key, 32 bytes
+  optional bytes data_bytes = 5;  // Cached canonical encoding of MessageData (used by verify_message)
+}
+
+message MessageData {
+  MessageType type    = 1;
+  uint64 mid          = 2;  // Make ID
+  uint32 timestamp    = 3;  // Makechain epoch seconds
+  Network network     = 4;
+
+  oneof body {
+    // 1P: Singleton — creates a new resource, no remove counterpart
+    ForkBody              fork               = 13;
+
+    // 1P: LWW Register — last-write-wins per (project_id, field) or (mid, field)
+    ProjectMetadataBody   project_metadata   = 11;
+    AccountDataBody       account_data       = 50;
+
+    // 1P: Append-only — grows monotonically, pruned by protocol
+    CommitBundleBody      commit_bundle      = 30;
+
+    // 1P: State transition — irreversible
+    ProjectArchiveBody    project_archive    = 12;
+
+    // 2P: Add/Remove — paired operations on a set, remove-wins on tie
+    ProjectCreateBody     project_create     = 10;
+    ProjectRemoveBody     project_remove     = 14;
+
+    RefUpdateBody         ref_update         = 20;
+    RefDeleteBody         ref_delete         = 21;
+
+    CollaboratorAddBody   collaborator_add   = 40;
+    CollaboratorRemoveBody collaborator_remove = 41;
+
+    KeyAddBody            key_add            = 60;
+    // Field 61 (key_remove) removed — use SIGNER_REMOVE instead
+
+    VerificationAddBody   verification_add   = 70;
+    VerificationRemoveBody verification_remove = 71;
+
+    // 1P: Relay-injected — ownership transfer from onchain registry
+    OwnershipTransferBody ownership_transfer = 80;
+    StorageRentBody       storage_rent       = 81;
+
+    // 2P: Add/Remove — social graph links (follow, star)
+    LinkAddBody           link_add           = 90;
+    LinkRemoveBody        link_remove        = 91;
+
+    // 2P: Add/Remove — commit reactions (likes)
+    ReactionAddBody       reaction_add       = 92;
+    ReactionRemoveBody    reaction_remove    = 93;
+
+    // 2P: Add/Remove — self-authenticating key operations (client-submitted)
+    SignerAddBody         signer_add         = 94;
+    SignerRemoveBody      signer_remove      = 95;
+
+    // 2P: Add/Remove — relay-injected signer operations (onchain authorization)
+    RelaySignerAddBody    relay_signer_add   = 96;
+    RelaySignerRemoveBody relay_signer_remove = 97;
+  }
+}
+
+enum MessageType {
+  MESSAGE_TYPE_NONE              = 0;
+
+  // 1P: Singleton
+  MESSAGE_TYPE_FORK              = 4;
+
+  // 1P: LWW Register
+  MESSAGE_TYPE_PROJECT_METADATA  = 2;
+  MESSAGE_TYPE_ACCOUNT_DATA      = 40;
+
+  // 1P: Append-only
+  MESSAGE_TYPE_COMMIT_BUNDLE     = 20;
+
+  // 1P: State transition
+  MESSAGE_TYPE_PROJECT_ARCHIVE   = 3;
+
+  // 2P: Project set
+  MESSAGE_TYPE_PROJECT_CREATE    = 1;
+  MESSAGE_TYPE_PROJECT_REMOVE    = 5;
+
+  // 2P: Ref set (CAS-ordered, not LWW)
+  MESSAGE_TYPE_REF_UPDATE        = 10;
+  MESSAGE_TYPE_REF_DELETE        = 11;
+
+  // 2P: Collaborator set
+  MESSAGE_TYPE_COLLABORATOR_ADD  = 30;
+  MESSAGE_TYPE_COLLABORATOR_REMOVE = 31;
+
+  // Key registration (relayed from onchain)
+  MESSAGE_TYPE_KEY_ADD           = 50;
+  // Enum value 51 (KEY_REMOVE) removed — use SIGNER_REMOVE instead
+
+  // 2P: Verification set
+  MESSAGE_TYPE_VERIFICATION_ADD    = 60;
+  MESSAGE_TYPE_VERIFICATION_REMOVE = 61;
+
+  // 2P: Link set
+  MESSAGE_TYPE_LINK_ADD            = 80;
+  MESSAGE_TYPE_LINK_REMOVE         = 81;
+
+  // 2P: Reaction set
+  MESSAGE_TYPE_REACTION_ADD        = 82;
+  MESSAGE_TYPE_REACTION_REMOVE     = 83;
+
+  // 1P: Relay-injected
+  MESSAGE_TYPE_OWNERSHIP_TRANSFER  = 70;
+  MESSAGE_TYPE_STORAGE_RENT        = 71;
+
+  // 2P: Signer set (self-authenticating, client-submitted)
+  MESSAGE_TYPE_SIGNER_ADD    = 14;
+  MESSAGE_TYPE_SIGNER_REMOVE = 15;
+
+  // 2P: Signer set (relay-injected, onchain-authorized)
+  MESSAGE_TYPE_RELAY_SIGNER_ADD = 16;
+  MESSAGE_TYPE_RELAY_SIGNER_REMOVE = 17;
+}
+
+enum Network {
+  NETWORK_NONE    = 0;
+  NETWORK_MAINNET = 1;
+  NETWORK_TESTNET = 2;
+  NETWORK_DEVNET  = 3;
+}
+
+// ============================================================
+// 2P: PROJECT SET — Create/Remove
+//
+// project_id = BLAKE3 hash of the PROJECT_CREATE message (32 bytes).
+// Content-addressed: two projects with the same name get different IDs
+// because the hash includes mid, timestamp, etc.
+// ============================================================
+
+message ProjectCreateBody {
+  string name          = 1;  // Alphanumeric + hyphens, 1-100 chars
+  Visibility visibility = 2;
+  string description   = 3;
+  string license       = 4;  // SPDX identifier
+  // project_id is not a field — it IS the Message.hash of this message
+}
+
+message ProjectRemoveBody {
+  bytes project_id = 1;  // BLAKE3 hash of the PROJECT_CREATE message, 32 bytes
+}
+
+enum Visibility {
+  VISIBILITY_PUBLIC  = 0;
+  VISIBILITY_PRIVATE = 1;
+}
+
+// ============================================================
+// 1P: SINGLETON
+// ============================================================
+
+message ForkBody {
+  bytes source_project_id  = 1;  // 32 bytes
+  string name              = 2;
+  reserved 3;                    // Was state_proof
+  bytes source_commit_hash = 4;  // Target hash: the commit being forked from, 32 bytes
+  Visibility visibility    = 5;  // Visibility of forked project (default: PUBLIC)
+  // forked project_id = Message.hash of this FORK message
+}
+
+// ============================================================
+// 1P: LWW REGISTER — Metadata
+// ============================================================
+
+message ProjectMetadataBody {
+  bytes project_id               = 1;  // 32 bytes
+  ProjectMetadataType field      = 2;
+  string value                   = 3;
+}
+
+enum ProjectMetadataType {
+  PROJECT_METADATA_NONE        = 0;
+  PROJECT_METADATA_NAME        = 1;
+  PROJECT_METADATA_DESCRIPTION = 2;
+  PROJECT_METADATA_LICENSE     = 3;
+  PROJECT_METADATA_VISIBILITY  = 4;
+}
+
+message AccountDataBody {
+  AccountDataType field = 1;
+  string value          = 2;
+}
+
+enum AccountDataType {
+  ACCOUNT_DATA_NONE     = 0;
+  ACCOUNT_DATA_USERNAME = 1;
+  ACCOUNT_DATA_AVATAR   = 2;
+  ACCOUNT_DATA_BIO      = 3;
+  ACCOUNT_DATA_WEBSITE  = 4;
+}
+
+// ============================================================
+// 1P: APPEND-ONLY — Commits
+// ============================================================
+
+message CommitBundleBody {
+  bytes project_id           = 1;  // 32 bytes
+  repeated CommitMeta commits = 2;  // Ordered parent-first
+  bytes content_digest       = 3;  // Optional: integrity proof (e.g. Zoda commitment), 32 bytes
+  string url                 = 4;  // Optional: content locator URL
+}
+
+message CommitMeta {
+  bytes hash             = 1;  // BLAKE3 of full commit object, 32 bytes
+  repeated bytes parents = 2;  // Parent commit hashes
+  bytes tree_root        = 3;  // BLAKE3 of tree object
+  uint64 author_mid      = 4;  // Make ID of commit author
+  uint32 author_timestamp = 5;
+  string title           = 6;  // First line of commit message, max 200 chars
+  bytes message_hash     = 7;  // BLAKE3 of full commit message
+}
+
+// ============================================================
+// 1P: STATE TRANSITION
+// ============================================================
+
+message ProjectArchiveBody {
+  bytes project_id = 1;  // 32 bytes
+}
+
+// ============================================================
+// 2P: REF SET — CAS-ordered add/remove
+// ============================================================
+
+message RefUpdateBody {
+  bytes project_id = 1;   // 32 bytes
+  bytes ref_name   = 2;   // UTF-8, e.g. "refs/heads/main"
+  RefType ref_type = 3;
+  bytes old_hash   = 4;   // CAS: expected current value (empty = new ref)
+  bytes new_hash   = 5;   // New commit hash, BLAKE3, 32 bytes
+  bool force       = 6;   // Skip fast-forward check
+  uint64 nonce     = 7;   // Replay protection per (mid, project, ref)
+}
+
+enum RefType {
+  REF_TYPE_BRANCH = 0;
+  REF_TYPE_TAG    = 1;
+}
+
+message RefDeleteBody {
+  bytes project_id    = 1;  // 32 bytes
+  bytes ref_name      = 2;
+  bytes expected_hash = 3;  // CAS
+  uint64 nonce        = 4;
+}
+
+// ============================================================
+// 2P: COLLABORATOR SET — Add/Remove
+// ============================================================
+
+message CollaboratorAddBody {
+  bytes project_id         = 1;  // 32 bytes
+  uint64 target_mid        = 2;  // Make ID being granted access
+  Permission permission    = 3;
+}
+
+message CollaboratorRemoveBody {
+  bytes project_id         = 1;  // 32 bytes
+  uint64 target_mid        = 2;  // Make ID to revoke
+}
+
+enum Permission {
+  PERMISSION_READ  = 0;
+  PERMISSION_WRITE = 1;
+  PERMISSION_ADMIN = 2;
+  PERMISSION_OWNER = 3;
+}
+
+// ============================================================
+// 2P: KEY SET — Add/Remove (relayed from onchain)
+// ============================================================
+
+message KeyAddBody {
+  bytes key               = 1;  // Ed25519 public key, 32 bytes
+  KeyScope scope          = 2;
+  repeated bytes allowed_projects = 3;  // Agent scope: restrict to these project IDs (32 bytes each). Empty = unrestricted.
+  bytes owner_address     = 4;  // 20-byte EVM wallet address (set by registry relay on registration, immutable once set)
+}
+
+// KeyRemoveBody removed — use SIGNER_REMOVE instead
+
+enum KeyScope {
+  KEY_SCOPE_OWNER   = 0;
+  KEY_SCOPE_SIGNING = 1;
+  KEY_SCOPE_AGENT   = 2;
+}
+
+// ============================================================
+// 1P: RELAY-INJECTED — Registry state updates
+// ============================================================
+
+message OwnershipTransferBody {
+  bytes new_owner_address      = 1;  // 20-byte EVM address of the new owner
+  bytes previous_owner_address = 2;  // 20-byte EVM address of the previous owner (defense-in-depth)
+  bytes relay_event_id         = 3;  // BLAKE3(domain || block_number || tx_index || log_index), 32 bytes when set
+}
+
+message StorageRentBody {
+  bytes actor         = 1;  // 20-byte EVM address that paid or credited the rent
+  uint32 units        = 2;  // Units granted by this rent event
+  uint32 expires_at   = 3;  // Consensus timestamp when this grant expires
+  bytes relay_event_id = 4; // BLAKE3(domain || block_number || tx_index || log_index), 32 bytes
+}
+
+// ============================================================
+// 2P: VERIFICATION SET — Add/Remove (external identity proofs)
+// ============================================================
+
+message VerificationAddBody {
+  VerificationType verification_type = 1;
+  bytes address                      = 2;  // External address/identifier (e.g. 20-byte Ethereum address)
+  bytes claim_signature              = 3;  // Signature from the external key proving ownership
+  bytes chain_id                     = 4;  // Chain identifier (e.g. 1 = Ethereum mainnet, 10 = Optimism)
+}
+
+message VerificationRemoveBody {
+  bytes address = 1;  // Same address as the VerificationAdd being removed
+}
+
+enum VerificationType {
+  VERIFICATION_TYPE_NONE          = 0;
+  VERIFICATION_TYPE_ETH_ADDRESS   = 1;  // Ethereum EOA
+  VERIFICATION_TYPE_SOL_ADDRESS   = 2;  // Solana address
+}
+
+// ============================================================
+// 2P: LINK SET — Social graph relationships (follow, star)
+// ============================================================
+
+message LinkAddBody {
+  LinkType link_type          = 1;
+  oneof target {
+    uint64 target_mid         = 2;  // For FOLLOW (account → account)
+    bytes target_project_id   = 3;  // For STAR (account → project), 32 bytes
+  }
+}
+
+message LinkRemoveBody {
+  LinkType link_type          = 1;
+  oneof target {
+    uint64 target_mid         = 2;
+    bytes target_project_id   = 3;
+  }
+}
+
+enum LinkType {
+  LINK_TYPE_NONE   = 0;
+  LINK_TYPE_FOLLOW = 1;  // Account follows another account
+  LINK_TYPE_STAR   = 2;  // Account stars a project
+}
+
+// ============================================================
+// 2P: REACTION SET — Commit reactions (likes)
+// ============================================================
+
+message ReactionAddBody {
+  ReactionType reaction_type     = 1;
+  bytes target_project_id        = 2;  // 32 bytes
+  bytes target_commit_hash       = 3;  // 32 bytes
+}
+
+message ReactionRemoveBody {
+  ReactionType reaction_type     = 1;
+  bytes target_project_id        = 2;  // 32 bytes
+  bytes target_commit_hash       = 3;  // 32 bytes
+}
+
+enum ReactionType {
+  REACTION_TYPE_NONE = 0;
+  REACTION_TYPE_LIKE = 1;
+}
+
+// ============================================================
+// 2P: SIGNER SET — Self-authenticating key operations
+//
+// Unlike KEY_ADD (relay-injected), these are submitted directly by clients.
+// Authorization comes from an EIP-712 custody_signature signed by the
+// account's owner_address, not from the message envelope signer.
+// ============================================================
+
+message SignerAddBody {
+  bytes key = 1;                        // Ed25519 public key, 32 bytes
+  uint32 scope = 2;                     // KeyScope: 0 = Owner, 1 = Signing, 2 = Agent
+  bytes custody_signature = 3;          // EIP-712 signature: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
+  reserved 4;                           // Was deadline
+  repeated bytes allowed_projects = 5;  // Agent scope: project IDs (32 bytes each)
+  uint32 custody_key_type = 6;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256
+  uint64 nonce = 7;                     // Must match account custody_nonce (replay protection)
+  uint64 request_mid = 8;              // MID of requesting app (mandatory, must be non-zero)
+  bytes request_signature = 9;         // EIP-712 SignerRequest sig from app's owner_address: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
+  uint32 request_key_type = 10;        // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256 (request sig curve)
+  uint64 valid_after = 11;             // Earliest unix timestamp accepted for this authorization
+  uint64 valid_before = 12;            // Latest unix timestamp accepted for this authorization
+}
+
+message SignerRemoveBody {
+  bytes key = 1;                        // Ed25519 public key to remove, 32 bytes
+  bytes custody_signature = 2;          // EIP-712 signature: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
+  uint32 custody_key_type = 4;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256
+  reserved 3;                           // Was deadline
+  uint64 nonce = 5;                     // Must match account custody_nonce (replay protection)
+  uint64 valid_after = 6;               // Earliest unix timestamp accepted for this authorization
+  uint64 valid_before = 7;              // Latest unix timestamp accepted for this authorization
+}
+
+message RelaySignerAddBody {
+  bytes key = 1;                        // Ed25519 public key, 32 bytes
+  KeyScope scope = 2;
+  repeated bytes allowed_projects = 3;  // Agent scope: project IDs (32 bytes each)
+  uint64 request_mid = 4;               // MID of requesting app (mandatory, must be non-zero)
+  bytes request_signature = 5;          // EIP-712 SignerRequest sig from app owner: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
+  uint32 request_key_type = 6;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256
+  uint64 valid_after = 7;               // Earliest unix timestamp accepted for this authorization
+  uint64 valid_before = 8;              // Latest unix timestamp accepted for this authorization
+  bytes relay_event_id = 9;             // BLAKE3(domain || block_number || tx_index || log_index), 32 bytes
+}
+
+message RelaySignerRemoveBody {
+  bytes key = 1;                        // Ed25519 public key to remove, 32 bytes
+  bytes relay_event_id = 2;             // BLAKE3(domain || block_number || tx_index || log_index), 32 bytes
+}
+
+// ============================================================
+// RELAY — Block digest broadcast (wire-only, not part of RPC API)
+// ============================================================
+
+message ProjectMessages {
+  bytes project_id = 1;           // 32 bytes
+  repeated Message messages = 2;
+}
+
+message RelayPayload {
+  bytes digest = 1;                          // BLAKE3 state root, 32 bytes
+  repeated Message account_messages = 2;
+  repeated ProjectMessages project_messages = 3;
+  uint64 timestamp = 4;                      // proposer's wall-clock timestamp (unix secs)
+  uint64 block_number = 5;                   // target block height for this proposal
+  bytes parent_hash = 6;                     // 32 bytes previous block hash
+  uint32 chain_id = 7;                       // proto::Network enum value
+  uint32 version = 8;                        // block header version
+}
+
+message SubblockPayload {
+  bytes validator_key = 1;              // 32 bytes Ed25519 public key
+  bytes parent_hash = 2;               // 32 bytes chain tip (staleness check)
+  bytes signature = 3;                  // 64 bytes Ed25519 over BLAKE3(content)
+  repeated Message account_messages = 4;
+  repeated ProjectMessages project_messages = 5;
+  uint64 timestamp = 6;
+}
+
+// ============================================================
+// BLOCKS AND SHARDS
+// ============================================================
+
+message Height {
+  uint32 shard_index  = 1;
+  uint64 block_number = 2;
+}
+
+message ShardChunk {
+  ShardHeader header                  = 1;
+  bytes hash                          = 2;
+  repeated ProjectTransaction txns    = 3;
+  Commits commits                     = 4;
+}
+
+message ShardHeader {
+  Height height      = 1;
+  uint64 timestamp   = 2;
+  bytes parent_hash  = 3;
+  bytes shard_root   = 4;
+}
+
+message ProjectTransaction {
+  bytes project_id                 = 1;  // 32 bytes
+  repeated Message user_messages   = 2;
+  bytes project_root               = 3;  // Merkle root after applying
+}
+
+message Block {
+  BlockHeader header             = 1;
+  bytes hash                     = 2;
+  ShardWitness witness           = 3;
+  Commits commits                = 4;
+  repeated ShardChunk chunks     = 5;  // Transaction data (single chunk in single-chain mode)
+  bytes consensus_finalization   = 6;  // commonware-codec Finalization<ed25519, Blake3Digest>
+}
+
+message BlockHeader {
+  Height height            = 1;
+  uint64 timestamp         = 2;
+  uint32 version           = 3;
+  Network chain_id         = 4;
+  bytes parent_hash        = 5;
+  bytes state_root         = 6;
+}
+
+message ShardWitness {
+  repeated ShardChunkRef shard_refs = 1;
+}
+
+message ShardChunkRef {
+  Height height      = 1;
+  bytes shard_root   = 2;
+  bytes shard_hash   = 3;
+}
+
+// ============================================================
+// CONSENSUS
+// ============================================================
+
+message Vote {
+  Height height  = 1;
+  bytes value    = 2;  // Hash of proposed block/chunk
+  bytes voter    = 3;  // Ed25519 public key
+}
+
+message CommitSignature {
+  bytes signer    = 1;
+  bytes signature = 2;
+}
+
+message Commits {
+  Height height                     = 1;
+  bytes value                       = 2;
+  repeated CommitSignature signatures = 3;
+}
+
+// ============================================================
+// API SERVICE
+// ============================================================
+
+service MakechainService {
+  // Write path
+  rpc SubmitMessage(SubmitMessageRequest) returns (SubmitMessageResponse);
+  rpc BatchSubmitMessages(BatchSubmitRequest) returns (BatchSubmitResponse);
+
+  // Read path — projects
+  rpc GetProject(GetProjectRequest) returns (GetProjectResponse);
+  rpc GetProjectByName(GetProjectByNameRequest) returns (GetProjectResponse);
+  rpc SearchProjects(SearchProjectsRequest) returns (ListProjectsResponse);
+  rpc ListProjects(ListProjectsRequest) returns (ListProjectsResponse);
+  rpc GetProjectActivity(GetProjectActivityRequest) returns (GetProjectActivityResponse);
+
+  // Read path — refs
+  rpc GetRef(GetRefRequest) returns (GetRefResponse);
+  rpc ListRefs(ListRefsRequest) returns (ListRefsResponse);
+
+  // Read path — commits
+  rpc GetCommit(GetCommitRequest) returns (GetCommitResponse);
+  rpc ListCommits(ListCommitsRequest) returns (ListCommitsResponse);
+
+  // Read path — collaborators
+  rpc ListCollaborators(ListCollaboratorsRequest) returns (ListCollaboratorsResponse);
+
+  // Read path — account
+  rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+  rpc GetAccountByKey(GetAccountByKeyRequest) returns (GetAccountResponse);
+  rpc GetAccountActivity(GetAccountActivityRequest) returns (GetAccountActivityResponse);
+
+  // Read path — keys
+  rpc GetKey(GetKeyRequest) returns (GetKeyResponse);
+  rpc ListKeys(ListKeysRequest) returns (ListKeysResponse);
+
+  // Read path — verifications
+  rpc ListVerifications(ListVerificationsRequest) returns (ListVerificationsResponse);
+
+  // Read path — links
+  rpc ListLinks(ListLinksRequest) returns (ListLinksResponse);
+  rpc ListLinksByTarget(ListLinksByTargetRequest) returns (ListLinksByTargetResponse);
+
+  // Read path — reactions
+  rpc ListReactions(ListReactionsRequest) returns (ListReactionsResponse);
+  rpc ListReactionsByTarget(ListReactionsByTargetRequest) returns (ListReactionsByTargetResponse);
+
+  // Read path — blocks
+  rpc GetBlock(GetBlockRequest) returns (GetBlockResponse);
+  rpc ListBlocks(ListBlocksRequest) returns (ListBlocksResponse);
+
+  // Read path — messages
+  rpc GetMessage(GetMessageRequest) returns (GetMessageResponse);
+  rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
+
+  // Node status
+  rpc GetNodeStatus(GetNodeStatusRequest) returns (GetNodeStatusResponse);
+  rpc GetChainStats(GetChainStatsRequest) returns (GetChainStatsResponse);
+
+  // Snapshots
+  rpc GetSnapshotInfo(GetSnapshotInfoRequest) returns (GetSnapshotInfoResponse);
+
+  // Validation
+  rpc DryRunMessage(DryRunMessageRequest) returns (DryRunMessageResponse);
+
+  // Commit graph
+  rpc GetCommitAncestors(GetCommitAncestorsRequest) returns (GetCommitAncestorsResponse);
+
+  // Ref history
+  rpc GetRefLog(GetRefLogRequest) returns (GetRefLogResponse);
+
+  // Admin
+  rpc GetMempoolInfo(GetMempoolInfoRequest) returns (GetMempoolInfoResponse);
+
+  // Health
+  rpc GetHealth(GetHealthRequest) returns (GetHealthResponse);
+
+  // Streaming
+  rpc SubscribeMessages(SubscribeRequest) returns (stream Message);
+  rpc SubscribeBlocks(SubscribeBlocksRequest) returns (stream GetBlockResponse);
+
+  // Sync — QMDB proof-verified state sync
+  rpc GetSyncTarget(GetSyncTargetRequest) returns (GetSyncTargetResponse);
+  rpc SyncFetch(SyncFetchRequest) returns (SyncFetchResponse);
+
+  // Sync — block-by-block catch-up from a peer
+  rpc SyncBlocks(SyncBlocksRequest) returns (stream SyncBlocksResponse);
+
+  // Proofs — QMDB current-state proofs
+  rpc GetOperationProof(GetOperationProofRequest) returns (GetOperationProofResponse);
+  rpc GetExclusionProof(GetExclusionProofRequest) returns (GetExclusionProofResponse);
+  rpc VerifyOperationProof(VerifyOperationProofRequest) returns (VerifyOperationProofResponse);
+  rpc GetStorageQuotaProof(GetStorageQuotaProofRequest) returns (GetStorageQuotaProofResponse);
+}
+
+// --- Write ---
+
+message SubmitMessageRequest {
+  Message message = 1;
+}
+
+message SubmitMessageResponse {
+  bytes hash = 1;       // BLAKE3 hash of accepted message
+  bool accepted = 2;
+  string error = 3;     // Non-empty if !accepted
+}
+
+message BatchSubmitRequest {
+  repeated Message messages = 1;  // Up to 100 messages
+}
+
+message BatchSubmitResult {
+  bytes hash = 1;
+  bool accepted = 2;
+  string error = 3;
+}
+
+message BatchSubmitResponse {
+  repeated BatchSubmitResult results = 1;
+  uint32 accepted_count = 2;
+  uint32 rejected_count = 3;
+}
+
+// --- Projects ---
+
+message GetProjectRequest {
+  bytes project_id = 1;  // 32 bytes
+  uint64 caller_mid = 2 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message GetProjectResponse {
+  bytes project_id = 1;
+  string name = 2;
+  string description = 3;
+  string license = 4;
+  Visibility visibility = 5;
+  uint64 owner_mid = 6;
+  string status = 7;     // "active", "archived", "removed"
+  bytes fork_source = 8; // Source project_id if forked, empty otherwise
+  uint32 ref_count = 9;
+  uint32 collaborator_count = 10;
+  uint32 commit_count = 11;
+  uint32 max_refs = 12;           // Per-project ref limit (spec §10)
+  uint32 max_collaborators = 13;  // Per-project collaborator limit
+  uint32 max_commits = 14;        // Per-project commit limit (before pruning)
+}
+
+message GetProjectByNameRequest {
+  uint64 owner_mid = 1;    // Owner account
+  string name = 2;          // Project name
+  uint64 caller_mid = 3 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message SearchProjectsRequest {
+  string query = 1;         // Name prefix search
+  uint64 owner_mid = 2;    // Filter by owner (0 = all)
+  uint32 limit = 3;         // Max results (default 50)
+  bytes cursor = 4;         // Opaque pagination cursor from previous response
+  uint64 caller_mid = 5 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message GetProjectActivityRequest {
+  bytes project_id = 1;     // 32 bytes
+  uint32 limit = 2;          // Max messages (default 50)
+  repeated MessageType types = 3;  // Filter by type (empty = all)
+  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message GetProjectActivityResponse {
+  repeated MessageEntry messages = 1;
+}
+
+message ListProjectsRequest {
+  uint64 owner_mid = 1;    // Filter by owner (0 = all)
+  uint32 limit = 2;
+  bytes cursor = 3;         // Opaque pagination cursor
+  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message ListProjectsResponse {
+  repeated GetProjectResponse projects = 1;
+  bytes next_cursor = 2;
+}
+
+// --- Refs ---
+
+message GetRefRequest {
+  bytes project_id = 1;
+  bytes ref_name = 2;
+  uint64 caller_mid = 3 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message GetRefResponse {
+  bytes project_id = 1;
+  bytes ref_name = 2;
+  RefType ref_type = 3;
+  bytes hash = 4;           // Current commit hash
+  uint64 nonce = 5;
+}
+
+message ListRefsRequest {
+  bytes project_id = 1;
+  uint32 limit = 2;
+  bytes cursor = 3;
+  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message ListRefsResponse {
+  repeated GetRefResponse refs = 1;
+  bytes next_cursor = 2;
+}
+
+// --- Commits ---
+
+message GetCommitRequest {
+  bytes project_id = 1;
+  bytes commit_hash = 2;    // 32 bytes
+  uint64 caller_mid = 3 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message GetCommitResponse {
+  bytes project_id = 1;
+  CommitMeta commit = 2;
+  bytes content_digest = 3;  // Optional: integrity proof from the commit bundle
+  string url = 4;            // Optional: content locator URL from the commit bundle
+}
+
+message ListCommitsRequest {
+  bytes project_id = 1;
+  uint32 limit = 2;
+  bytes cursor = 3;
+  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message ListCommitsResponse {
+  repeated GetCommitResponse commits = 1;
+  bytes next_cursor = 2;
+}
+
+// --- Collaborators ---
+
+message ListCollaboratorsRequest {
+  bytes project_id = 1;
+  uint32 limit = 2;
+  bytes cursor = 3;
+  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message CollaboratorEntry {
+  uint64 mid = 1;
+  Permission permission = 2;
+}
+
+message ListCollaboratorsResponse {
+  repeated CollaboratorEntry collaborators = 1;
+  bytes next_cursor = 2;
+}
+
+// --- Account ---
+
+message GetAccountRequest {
+  uint64 mid = 1;
+}
+
+message GetAccountByKeyRequest {
+  bytes key = 1;  // Ed25519 public key, 32 bytes
+}
+
+message GetAccountResponse {
+  uint64 mid = 1;
+  string username = 2;
+  string avatar = 3;
+  string bio = 4;
+  string website = 5;
+  repeated KeyEntry keys = 6;
+  uint32 storage_units = 7;  // Currently active rented storage units (free-tier capacity is reflected in max_* fields)
+  uint32 project_count = 8;
+  repeated VerificationEntry verifications = 9;
+  bytes owner_address = 10;  // 20-byte EVM wallet address (empty if not yet set)
+  uint32 link_count = 11;    // Number of links (follows + stars) from this account
+  uint32 reaction_count = 12; // Number of reactions (likes) from this account
+  uint64 custody_nonce = 13; // Next expected signer nonce; finalized relay signer events may advance it before a prepared offchain request is submitted
+  uint32 max_projects = 14;
+  uint32 max_links = 15;
+  uint32 max_verifications = 16;
+  uint32 max_reactions = 17;
+  uint32 max_collaborators_per_project = 18;
+}
+
+message KeyEntry {
+  bytes key = 1;
+  KeyScope scope = 2;
+  repeated bytes allowed_projects = 3;
+  uint64 request_mid = 4;              // MID of app that requested this key (0 = none)
+}
+
+message GetKeyRequest {
+  uint64 mid = 1;
+  bytes key = 2;   // Ed25519 public key, 32 bytes
+}
+
+message GetKeyResponse {
+  bytes key = 1;
+  KeyScope scope = 2;
+  repeated bytes allowed_projects = 3;
+  uint32 added_at = 4;
+  uint64 request_mid = 5;              // MID of app that requested this key (0 = none)
+}
+
+message ListKeysRequest {
+  uint64 mid = 1;
+  uint32 limit = 2;
+  bytes cursor = 3;     // public key to start after (for pagination)
+}
+
+message ListKeysResponse {
+  repeated GetKeyResponse keys = 1;
+  bytes next_cursor = 2;
+}
+
+message GetAccountActivityRequest {
+  uint64 mid = 1;
+  uint32 limit = 2;          // Max messages (default 50)
+  repeated MessageType types = 3;  // Filter by type (empty = all)
+}
+
+message GetAccountActivityResponse {
+  repeated MessageEntry messages = 1;
+}
+
+// --- Blocks ---
+
+message GetBlockRequest {
+  uint64 block_number = 1;
+}
+
+message GetBlockResponse {
+  Block block = 1;
+  uint32 message_count = 2;  // Total messages in the block
+  repeated Message messages = 3;  // All committed messages (account + project level)
+}
+
+message ListBlocksRequest {
+  uint64 start = 1;          // Starting block number (0 = latest)
+  uint32 limit = 2;          // Max blocks to return
+}
+
+message ListBlocksResponse {
+  repeated GetBlockResponse blocks = 1;
+  uint64 latest_block = 2;   // Current chain height
+}
+
+// --- Messages ---
+
+message GetMessageRequest {
+  bytes hash = 1;             // 32-byte BLAKE3 hash of the message
+}
+
+message GetMessageResponse {
+  Message message = 1;        // The full message
+  uint64 block_number = 2;    // Block that included this message
+}
+
+// --- List Messages ---
+
+message ListMessagesRequest {
+  uint64 start_block = 1;          // Starting block number (inclusive, 0 = latest)
+  uint64 end_block = 2;            // Ending block number (inclusive, 0 = start_block)
+  uint32 limit = 3;                // Max messages to return
+  repeated MessageType types = 4;  // Filter by message type (empty = all)
+}
+
+message MessageEntry {
+  Message message = 1;
+  uint64 block_number = 2;
+}
+
+message ListMessagesResponse {
+  repeated MessageEntry messages = 1;
+  uint64 start_block = 2;         // Actual start block used
+  uint64 end_block = 3;           // Actual end block used
+}
+
+// --- Snapshot Info ---
+
+message GetSnapshotInfoRequest {}
+
+message GetSnapshotInfoResponse {
+  uint64 block_number = 1;          // Block height of the snapshot
+  bytes state_root = 2;             // BLAKE3 state root
+  uint32 entry_count = 3;           // Number of key-value entries
+  uint64 estimated_size_bytes = 4;  // Estimated encoded snapshot size
+}
+
+// --- Node Status ---
+
+message GetNodeStatusRequest {}
+
+message GetNodeStatusResponse {
+  uint64 current_block = 1;       // Latest committed block number
+  uint32 mempool_size = 2;        // Number of messages in the mempool
+  uint32 pending_blocks = 3;      // Pending blocks awaiting commit
+  Network network = 4;            // Network this node operates on
+  string version = 5;             // Node software version
+  uint64 uptime_secs = 6;         // Seconds since node started
+  uint64 total_messages = 7;      // Cumulative messages committed (survives GC)
+  uint32 state_entries = 8;       // Number of entries in the state store
+}
+
+// --- Chain Stats ---
+
+message GetChainStatsRequest {}
+
+message GetChainStatsResponse {
+  uint64 block_height = 1;
+  uint64 total_messages = 2;
+  uint32 total_projects = 3;
+  uint32 total_accounts = 4;
+  uint32 total_refs = 5;
+  uint32 total_commits = 6;
+  uint32 total_collaborators = 7;
+  uint32 total_keys = 8;
+  uint32 total_verifications = 9;
+  uint32 state_entries = 10;
+  uint32 total_links = 11;
+  uint32 total_reactions = 12;
+}
+
+// --- Verifications ---
+
+message ListVerificationsRequest {
+  uint64 mid = 1;
+  uint32 limit = 2;
+  bytes cursor = 3;
+}
+
+message VerificationEntry {
+  VerificationType verification_type = 1;
+  bytes address = 2;
+  bytes chain_id = 3;
+}
+
+message ListVerificationsResponse {
+  repeated VerificationEntry verifications = 1;
+  bytes next_cursor = 2;
+}
+
+// --- Links ---
+
+message ListLinksRequest {
+  uint64 mid = 1;           // Account to list links from
+  LinkType link_type = 2;   // Filter by type (NONE = all)
+  uint32 limit = 3;
+  bytes cursor = 4;
+}
+
+message LinkEntry {
+  LinkType link_type = 1;
+  uint64 target_mid = 2;           // Set for FOLLOW links
+  bytes target_project_id = 3;     // Set for STAR links, 32 bytes
+  uint32 added_at = 4;             // Consensus timestamp when the link was created
+}
+
+message ListLinksResponse {
+  repeated LinkEntry links = 1;
+  bytes next_cursor = 2;
+}
+
+message ListLinksByTargetRequest {
+  LinkType link_type = 1;          // Required: FOLLOW or STAR
+  oneof target {
+    uint64 target_mid = 2;         // For FOLLOW: who is being followed
+    bytes target_project_id = 3;   // For STAR: which project is starred
+  }
+  uint32 limit = 4;
+  bytes cursor = 5;
+}
+
+message ListLinksByTargetResponse {
+  repeated LinkEntry links = 1;    // Each entry has the source mid populated
+  bytes next_cursor = 2;
+}
+
+// --- Reactions ---
+
+message ListReactionsRequest {
+  uint64 mid = 1;                    // Account to list reactions from
+  ReactionType reaction_type = 2;    // Filter by type (NONE = all)
+  bytes target_project_id = 3;       // Filter by project (empty = all)
+  uint32 limit = 4;
+  bytes cursor = 5;
+}
+
+message ReactionEntry {
+  ReactionType reaction_type = 1;
+  bytes target_project_id = 2;       // 32 bytes
+  bytes target_commit_hash = 3;      // 32 bytes
+  uint64 source_mid = 4;             // Account that reacted
+  uint32 added_at = 5;               // Consensus timestamp
+}
+
+message ListReactionsResponse {
+  repeated ReactionEntry reactions = 1;
+  bytes next_cursor = 2;
+}
+
+message ListReactionsByTargetRequest {
+  ReactionType reaction_type = 1;    // Required: LIKE
+  bytes target_project_id = 2;       // 32 bytes
+  bytes target_commit_hash = 3;      // 32 bytes
+  uint32 limit = 4;
+  bytes cursor = 5;
+}
+
+message ListReactionsByTargetResponse {
+  repeated ReactionEntry reactions = 1;
+  bytes next_cursor = 2;
+}
+
+// --- Streaming ---
+
+message SubscribeRequest {
+  bytes project_id = 1;     // Filter by project (empty = all)
+  repeated MessageType types = 2;  // Filter by type (empty = all)
+}
+
+message SubscribeBlocksRequest {}
+
+// --- Admin ---
+
+message GetMempoolInfoRequest {}
+
+message MempoolTypeCount {
+  MessageType message_type = 1;
+  uint32 count = 2;
+}
+
+message GetMempoolInfoResponse {
+  uint32 total = 1;
+  uint32 capacity = 2;
+  uint32 account_messages = 3;
+  uint32 project_messages = 4;
+  repeated MempoolTypeCount type_breakdown = 5;
+  uint32 oldest_timestamp = 6;
+  uint32 newest_timestamp = 7;
+}
+
+// --- Ref History ---
+
+message GetRefLogRequest {
+  bytes project_id = 1;
+  bytes ref_name = 2;
+  uint32 limit = 3;
+  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message RefLogEntry {
+  bytes old_hash = 1;
+  bytes new_hash = 2;
+  uint64 mid = 3;
+  uint32 timestamp = 4;
+  uint64 block_number = 5;
+  bool force = 6;
+  uint64 nonce = 7;
+}
+
+message GetRefLogResponse {
+  repeated RefLogEntry entries = 1;
+}
+
+// --- Health ---
+
+message GetHealthRequest {}
+
+message GetHealthResponse {
+  bool serving = 1;          // True if the gRPC server is accepting requests
+  bool ready = 2;            // True if the node has loaded state and can serve queries
+  uint64 current_block = 3;  // Latest committed block number (0 if not ready)
+  uint64 uptime_secs = 4;    // Seconds since node started
+}
+
+// --- Dry Run ---
+
+message DryRunMessageRequest {
+  Message message = 1;
+}
+
+message DryRunMessageResponse {
+  bool would_accept = 1;
+  string error = 2;           // Non-empty if would_accept is false
+  string error_stage = 3;     // "verification", "validation", "authorization", "state_transition"
+}
+
+// --- Commit Graph ---
+
+message GetCommitAncestorsRequest {
+  bytes project_id = 1;
+  bytes commit_hash = 2;     // Start commit (walk backwards from here)
+  uint32 limit = 3;          // Max commits to return (default 50)
+  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
+}
+
+message GetCommitAncestorsResponse {
+  repeated CommitMeta commits = 1;
+}
+
+// --- QMDB Proof-Verified Sync ---
+
+message GetSyncTargetRequest {}
+
+message GetSyncTargetResponse {
+  bytes root = 1;              // 32-byte QMDB ops MMR root digest (Blake3)
+  uint64 range_start = 2;     // Operation location range start (inclusive)
+  uint64 range_end = 3;       // Operation location range end (exclusive)
+  uint64 block_number = 4;    // Block number at this sync point
+  bytes canonical_root = 5;   // 32-byte canonical state root (consensus-authenticated)
+  Block block = 6;            // Certified committed tip block
+  repeated Message messages = 7; // Messages committed in the certified tip block
+  uint32 message_count = 8;   // Message count for consistency checks
+}
+
+message SyncFetchRequest {
+  uint64 op_count = 1;        // Total operation count at target (from GetSyncTarget.range_end)
+  uint64 start_location = 2;  // Start location to fetch from
+  uint64 max_operations = 3;  // Max operations per batch
+}
+
+message SyncFetchResponse {
+  bytes proof = 1;             // Encoded MMR Proof<Blake3Digest> (commonware-codec)
+  repeated bytes operations = 2; // Each operation encoded via commonware-codec
+}
+
+// --- Block Sync ---
+
+message SyncBlocksRequest {
+  uint64 start_height = 1;  // First block to stream (inclusive)
+  uint64 end_height = 2;    // Last block to stream (inclusive, 0 = latest)
+}
+
+message SyncBlocksResponse {
+  Block block = 1;               // The block header and metadata
+  repeated Message messages = 2; // All messages committed in this block
+  uint64 block_number = 3;       // Block number (convenience, also in block.header)
+  bool done = 4;                 // True on the final response
+}
+
+// --- Current-State Proofs ---
+
+message GetOperationProofRequest {
+  bytes key = 1;  // Raw supported public state key (e.g. commit_key output), not QMDB-padded
+}
+
+message GetOperationProofResponse {
+  bytes proof = 1;       // Serialized operation proof wire format (see state/proof.rs)
+  bytes root = 2;        // 32-byte canonical current QMDB root this proof was generated against
+  bytes value = 3;       // The current value of the key
+}
+
+message GetExclusionProofRequest {
+  bytes key = 1;  // Raw supported public state key (e.g. project-name or collaborator key), not QMDB-padded
+}
+
+message GetExclusionProofResponse {
+  bytes proof = 1;       // Serialized exclusion proof wire format (see state/proof.rs)
+  bytes root = 2;        // 32-byte canonical current QMDB root this proof was generated against
+}
+
+message VerifyOperationProofRequest {
+  bytes proof = 1;  // Serialized operation proof wire format (from GetOperationProof)
+  bytes key = 2;    // Raw state key (same format as GetOperationProofRequest.key)
+}
+
+message VerifyOperationProofResponse {
+  bool valid = 1;        // Whether the proof verifies against the current committed root
+  string error = 2;      // Human-readable error if invalid (empty if valid)
+  bytes root = 3;        // The committed root used for verification
+}
+
+message GetStorageQuotaProofRequest {
+  uint64 mid = 1;
+  uint32 as_of_unix_time = 2;  // Evaluate quota against the current root at this explicit time. Future values are rejected.
+}
+
+message StorageGrantProofEntry {
+  bytes key = 1;    // Raw storage_grant_key(mid, expires_at, relay_event_id)
+  bytes value = 2;  // JSON-encoded StorageGrantState value stored at key
+  bytes proof = 3;  // Serialized operation proof wire format (see state/proof.rs)
+}
+
+message GetStorageQuotaProofResponse {
+  uint64 mid = 1;
+  uint32 as_of_unix_time = 2;
+  bytes root = 3;                    // 32-byte canonical current QMDB root all returned proofs were generated against
+  bytes lower_bound_key = 4;         // Raw key immediately before the active suffix: [storage_grant_prefix(mid) | as_of_unix_time+1]
+  bytes lower_bound_proof = 5;       // Exclusion proof for lower_bound_key against root
+  repeated StorageGrantProofEntry grants = 6;
+  uint32 storage_units = 7;          // Sum of proven active grants with expires_at > as_of_unix_time
+  uint32 max_projects = 8;
+  uint32 max_links = 9;
+  uint32 max_verifications = 10;
+  uint32 max_reactions = 11;
+  uint32 max_collaborators_per_project = 12;
+}
