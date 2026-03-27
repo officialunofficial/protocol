@@ -104,7 +104,7 @@ Throughout this document, "MUST", "MUST NOT", "SHOULD", and "MAY" follow [RFC 21
 
 ### 2.1 Message Envelope
 
-Every message on the network is wrapped in an envelope. The canonical wire format is Protocol Buffers as defined in `proto/makechain.proto`.
+Every message on the network is wrapped in a [`Message`](proto/makechain.proto#L9) envelope. The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](proto/makechain.proto).
 
 ```
 Message {
@@ -116,9 +116,9 @@ Message {
 }
 ```
 
-**`canonical_encode(data)`** is the Makechain canonical byte encoding of `MessageData`. For `2026.3.0`, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
+**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](proto/makechain.proto#L17). For `2026.3.0`, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
 
-The `data_bytes` field (field 5 on `Message`) caches `canonical_encode(data)` — the same bytes that were hashed. Verifiers re-encode `data` independently and reject the message if `data_bytes` does not match, then check the hash against the re-encoded bytes. `data_bytes` is never used as a hash input directly; it exists so intermediaries can forward the original encoding without re-serializing.
+The `data_bytes` field (field 5 on [`Message`](proto/makechain.proto#L9)) caches `canonical_encode(data)` — the same bytes that were hashed. Verifiers re-encode `data` independently and reject the message if `data_bytes` does not match, then check the hash against the re-encoded bytes. `data_bytes` is never used as a hash input directly; it exists so intermediaries can forward the original encoding without re-serializing.
 
 **Authenticated user messages** — `hash`, `signature`, and `signer` MUST all be present and valid:
 ```
@@ -185,26 +185,26 @@ Every message type follows one of two paradigms:
 
 | Type | Enum Value | Paradigm | Required Scope | Body Proto |
 |------|-----------|----------|----------------|------------|
-| `PROJECT_CREATE` | 1 | 2P Set | SIGNING | `ProjectCreateBody` |
-| `PROJECT_METADATA` | 2 | 1P LWW | SIGNING + WRITE | `ProjectMetadataBody` |
+| `PROJECT_CREATE` | 1 | 2P Set | SIGNING | [`ProjectCreateBody`](proto/makechain.proto#L147) |
+| `PROJECT_METADATA` | 2 | 1P LWW | SIGNING + WRITE | [`ProjectMetadataBody`](proto/makechain.proto#L181) |
 | `PROJECT_ARCHIVE` | 3 | 1P Transition | SIGNING | `ProjectArchiveBody` |
 | `FORK` | 4 | 1P Singleton | SIGNING | `ForkBody` |
 | `PROJECT_REMOVE` | 5 | 2P Set | SIGNING | `ProjectRemoveBody` |
-| `REF_UPDATE` | 10 | 2P CAS | AGENT | `RefUpdateBody` |
-| `REF_DELETE` | 11 | 2P CAS | AGENT | `RefDeleteBody` |
-| `SIGNER_ADD` | 14 | Custody-auth | (custody sig) | `SignerAddBody` |
-| `SIGNER_REMOVE` | 15 | Custody-auth | (custody sig) | `SignerRemoveBody` |
-| `RELAY_SIGNER_ADD` | 16 | Relay | (onchain) | `RelaySignerAddBody` |
-| `RELAY_SIGNER_REMOVE` | 17 | Relay | (onchain) | `RelaySignerRemoveBody` |
-| `COMMIT_BUNDLE` | 20 | 1P Append | AGENT | `CommitBundleBody` |
+| `REF_UPDATE` | 10 | 2P CAS | AGENT | [`RefUpdateBody`](proto/makechain.proto#L241) |
+| `REF_DELETE` | 11 | 2P CAS | AGENT | [`RefDeleteBody`](proto/makechain.proto#L256) |
+| `SIGNER_ADD` | 14 | Custody-auth | (custody sig) | [`SignerAddBody`](proto/makechain.proto#L397) |
+| `SIGNER_REMOVE` | 15 | Custody-auth | (custody sig) | [`SignerRemoveBody`](proto/makechain.proto#L412) |
+| `RELAY_SIGNER_ADD` | 16 | Relay | (onchain) | [`RelaySignerAddBody`](proto/makechain.proto#L422) |
+| `RELAY_SIGNER_REMOVE` | 17 | Relay | (onchain) | [`RelaySignerRemoveBody`](proto/makechain.proto#L434) |
+| `COMMIT_BUNDLE` | 20 | 1P Append | AGENT | [`CommitBundleBody`](proto/makechain.proto#L212) |
 | `COLLABORATOR_ADD` | 30 | 2P Set | SIGNING (ADMIN) | `CollaboratorAddBody` |
 | `COLLABORATOR_REMOVE` | 31 | 2P Set | SIGNING (ADMIN) | `CollaboratorRemoveBody` |
 | `ACCOUNT_DATA` | 40 | 1P LWW | SIGNING | `AccountDataBody` |
-| `KEY_ADD` | 50 | Relay | (onchain) | `KeyAddBody` |
+| `KEY_ADD` | 50 | Relay | (onchain) | [`KeyAddBody`](proto/makechain.proto#L289) |
 | `VERIFICATION_ADD` | 60 | 2P Set | SIGNING | `VerificationAddBody` |
 | `VERIFICATION_REMOVE` | 61 | 2P Set | SIGNING | `VerificationRemoveBody` |
-| `OWNERSHIP_TRANSFER` | 70 | Relay | (onchain) | `OwnershipTransferBody` |
-| `STORAGE_RENT` | 71 | Relay | (onchain) | `StorageRentBody` |
+| `OWNERSHIP_TRANSFER` | 70 | Relay | (onchain) | [`OwnershipTransferBody`](proto/makechain.proto#L308) |
+| `STORAGE_RENT` | 71 | Relay | (onchain) | [`StorageRentBody`](proto/makechain.proto#L314) |
 | `LINK_ADD` | 80 | 2P Set | SIGNING | `LinkAddBody` |
 | `LINK_REMOVE` | 81 | 2P Set | SIGNING | `LinkRemoveBody` |
 | `REACTION_ADD` | 82 | 2P Set | SIGNING | `ReactionAddBody` |
@@ -622,13 +622,13 @@ authorize_signer_op(σ, data, body) → Ok | Err:
 
 `chainId: 0` is a protocol-defined domain separator, not the host chain's [EIP-155][eip155] chain ID.
 
-**SignerAdd type declaration:**
+**`SignerAdd` type declaration** (mirrors [`SignerAddBody`](proto/makechain.proto#L397)):
 ```
 SignerAdd(uint64 mid, bytes32 key, uint32 scope, uint64 validAfter,
           uint64 validBefore, uint64 nonce, bytes32[] allowedProjects, uint32 network)
 ```
 
-**SignerRemove type declaration:**
+**`SignerRemove` type declaration** (mirrors [`SignerRemoveBody`](proto/makechain.proto#L412)):
 ```
 SignerRemove(uint64 mid, bytes32 key, uint64 validAfter,
              uint64 validBefore, uint64 nonce, uint32 network)
@@ -642,10 +642,10 @@ SignerRemove(uint64 mid, bytes32 key, uint64 validAfter,
 | 1 | P256 (ECDSA) | `r:32 \| s:32 \| v:1` | 65 bytes |
 | 2 | WebAuthn (P256) | Variable-length envelope | 107–2048 bytes |
 
-- `valid_after` / `valid_before` bound `MessageData.timestamp`.
+- `valid_after` / `valid_before` bound [`MessageData.timestamp`](proto/makechain.proto#L20).
 - `nonce` MUST match the account's current `custody_nonce`.
 - `allowedProjects` binds the key's project allowlist into the `SignerAdd` signature, preventing allowlist manipulation before finalization.
-- `network` binds the signature to `MessageData.network`, preventing cross-network replay.
+- `network` binds the signature to [`MessageData.network`](proto/makechain.proto#L21), preventing cross-network replay.
 
 **[WebAuthn][webauthn] Envelope Wire Format (custody_key_type=2):**
 ```
@@ -659,7 +659,7 @@ SignerRemove(uint64 mid, bytes32 key, uint64 validAfter,
 
 ### 5.6 App Attribution
 
-Every `SIGNER_ADD` and `RELAY_SIGNER_ADD` MUST include app attribution:
+Every `SIGNER_ADD` and `RELAY_SIGNER_ADD` MUST include app attribution in [`SignerAddBody`](proto/makechain.proto#L397) and [`RelaySignerAddBody`](proto/makechain.proto#L422):
 
 - `request_mid` — MID of the requesting app (MUST be non-zero).
 - `request_signature` — EIP-712 `SignerRequest` signature from the requesting app's `owner_address`.
@@ -683,7 +683,7 @@ The `custody_nonce` counter is shared across all four signer operations: `SIGNER
 
 ### 5.8 Visibility
 
-The `Visibility` enum (`PUBLIC` / `PRIVATE`) is defined on `ProjectCreateBody`, `ForkBody`, and `ProjectMetadataBody`. In the current protocol version, visibility does not gate general read access to canonical project state, but it does constrain `FORK`: a private source project MAY be forked only by its owner or by a collaborator with at least `READ` permission. `PRIVATE` visibility is otherwise reserved for future access control extensions. Implementations MUST store and return the visibility value and MUST enforce the `FORK` access rule above.
+The [`Visibility`](proto/makechain.proto#L159) enum (`PUBLIC` / `PRIVATE`) is defined on [`ProjectCreateBody`](proto/makechain.proto#L147), [`ForkBody`](proto/makechain.proto#L168), and [`ProjectMetadataBody`](proto/makechain.proto#L181). In the current protocol version, visibility does not gate general read access to canonical project state, but it does constrain `FORK`: a private source project MAY be forked only by its owner or by a collaborator with at least `READ` permission. `PRIVATE` visibility is otherwise reserved for future access control extensions. Implementations MUST store and return the visibility value and MUST enforce the `FORK` access rule above.
 
 ---
 
@@ -749,6 +749,8 @@ This leaves 287 usable bytes. The maximum `ref_name` length is 254 bytes (prefix
 ### 6.3 State Proofs
 
 The state store supports two proof types, both anchored to a committed state root:
+
+The public proof RPC surface for these queries is [`GetOperationProof`](proto/makechain.proto#L635), [`GetExclusionProof`](proto/makechain.proto#L636), [`VerifyOperationProof`](proto/makechain.proto#L637), and [`GetStorageQuotaProof`](proto/makechain.proto#L638).
 
 - **Operation proof** — proves a key-value pair exists at a given root (Merkle inclusion path).
 - **Exclusion proof** — proves a key does NOT exist at a given root (neighboring key boundary).
@@ -852,9 +854,9 @@ BlockHeader {
 }
 ```
 
-The canonical wire format is Protocol Buffers as defined in `proto/makechain.proto`.
+The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](proto/makechain.proto). The corresponding protobuf messages are [`Block`](proto/makechain.proto#L497), [`BlockHeader`](proto/makechain.proto#L506), and [`RelayPayload`](proto/makechain.proto#L448).
 
-`consensus_finalization` commits to the digest of the associated `RelayPayload`, which is the canonical execution input:
+`consensus_finalization` commits to the digest of the associated [`RelayPayload`](proto/makechain.proto#L448), which is the canonical execution input:
 
 ```
 RelayPayload {
@@ -869,7 +871,7 @@ RelayPayload {
 }
 ```
 
-The finalized block header authenticates the post-execution state root; the finalized payload authenticates the exact executed message sequence. `proposal_digest(R)` refers to the hash of the canonical `RelayPayload` encoding, not to the `digest` field inside `R`.
+The finalized block header authenticates the post-execution state root; the finalized payload authenticates the exact executed message sequence. `proposal_digest(R)` refers to the hash of the canonical [`RelayPayload`](proto/makechain.proto#L448) encoding, not to the `digest` field inside `R`.
 
 #### Proposal Digest Construction
 
@@ -881,14 +883,14 @@ proposal_digest(R) = H(b"makechain:relay-payload:v1" || len(wire) as uint64 LE |
 ```
 
 Where:
-- `RelayPayload_proto(R)` converts the logical `RelayPayload` to its Protocol Buffers message form (field numbers as defined in `proto/makechain.proto`: `digest`=1, `account_messages`=2, `project_messages`=3, `timestamp`=4, `block_number`=5, `parent_hash`=6, `chain_id`=7, `version`=8).
+- `RelayPayload_proto(R)` converts the logical `RelayPayload` to its Protocol Buffers message form (field numbers as defined on [`RelayPayload`](proto/makechain.proto#L448) in [`proto/makechain.proto`](proto/makechain.proto): `digest`=1, `account_messages`=2, `project_messages`=3, `timestamp`=4, `block_number`=5, `parent_hash`=6, `chain_id`=7, `version`=8).
 - `canonical_encode` follows the determinism rules in Appendix B.1.
 - `len(wire)` is the byte length of the encoded protobuf, serialized as an 8-byte unsigned little-endian integer.
 - The domain separator `b"makechain:relay-payload:v1"` prevents cross-protocol hash collisions.
 
-The `project_messages` repeated field MUST be ordered by byte-lexicographic `project_id`, matching the `BTreeMap` iteration order in the reference implementation.
+The [`ProjectMessages`](proto/makechain.proto#L443) entries in `project_messages` MUST be ordered by byte-lexicographic `project_id`, matching the `BTreeMap` iteration order in the reference implementation.
 
-Persisted block verification therefore requires both the finalized `Block` and the associated ordered message stream sufficient to reconstruct the committed `RelayPayload`. A sync provider serving historical blocks MUST also serve the corresponding message stream, and a syncing node MUST verify that reconstructing `RelayPayload` from `(Block, messages)` yields the payload digest committed by `consensus_finalization`.
+Persisted block verification therefore requires both the finalized [`Block`](proto/makechain.proto#L497) and the associated ordered message stream sufficient to reconstruct the committed [`RelayPayload`](proto/makechain.proto#L448). A sync provider serving historical blocks MUST also serve the corresponding message stream, and a syncing node MUST verify that reconstructing `RelayPayload` from `(Block, messages)` yields the payload digest committed by `consensus_finalization`.
 
 The `proposal_digest(R)` value is what validators sign in finalization certificates. The domain separator `b"makechain:relay-payload:v1"` serves as the commitment version identifier. Future commitment format changes MUST use a new domain separator (e.g., `v2`) and require explicit activation semantics. A future protocol version SHOULD define a dedicated, transport-independent commitment structure rather than deriving the consensus commitment from the protobuf wire encoding of `RelayPayload`. A stable commitment schema would make the consensus-critical surface explicitly versioned, transport-independent, and clearer to evolve safely.
 
@@ -947,11 +949,11 @@ Relay messages derive trust from chain finality and state root consensus, not fr
 
 | Onchain Event | System Message Type |
 |---------------|-------------------|
-| `MidRegistered(mid, to, key, scope)` | `KEY_ADD` |
-| `OwnershipTransferred(mid, prev, new)` | `OWNERSHIP_TRANSFER` |
-| `Rent(actor, mid, units)` | `STORAGE_RENT` |
-| `SignerAddAuthorized(mid, key, scope, ...)` | `RELAY_SIGNER_ADD` |
-| `SignerRemoveAuthorized(mid, key)` | `RELAY_SIGNER_REMOVE` |
+| `MidRegistered(mid, to, key, scope)` | `KEY_ADD` ([`KeyAddBody`](proto/makechain.proto#L289)) |
+| `OwnershipTransferred(mid, prev, new)` | `OWNERSHIP_TRANSFER` ([`OwnershipTransferBody`](proto/makechain.proto#L308)) |
+| `Rent(actor, mid, units)` | `STORAGE_RENT` ([`StorageRentBody`](proto/makechain.proto#L314)) |
+| `SignerAddAuthorized(mid, key, scope, ...)` | `RELAY_SIGNER_ADD` ([`RelaySignerAddBody`](proto/makechain.proto#L422)) |
+| `SignerRemoveAuthorized(mid, key)` | `RELAY_SIGNER_REMOVE` ([`RelaySignerRemoveBody`](proto/makechain.proto#L434)) |
 
 ### 9.3 Determinism and Replay Protection
 
@@ -988,14 +990,14 @@ Messages accepted into the local mempool are forwarded to all connected validato
 ### 10.3 Sync
 
 New nodes joining the network:
-1. **State sync** — proof-verified download of the current state from a peer.
-2. **Block sync** — replay missed finalized `(Block, messages)` pairs from the state sync height to the current tip. The `messages` sidecar is consensus-critical because it carries the account-message order and, together with the block's project transactions, reconstructs the committed `RelayPayload`.
+1. **State sync** — proof-verified download of the current state from a peer via [`GetSyncTarget`](proto/makechain.proto#L628) and [`SyncFetch`](proto/makechain.proto#L629).
+2. **Block sync** — replay missed finalized `(Block, messages)` pairs from the state sync height to the current tip via [`SyncBlocks`](proto/makechain.proto#L632). The `messages` sidecar is consensus-critical because it carries the account-message order and, together with the block's project transactions, reconstructs the committed `RelayPayload`.
 
 ### 10.4 Follower Nodes
 
 A **follower node** is a non-validator node that tracks the chain by streaming finalized blocks from one or more validators, replaying state transitions, and serving read queries. Followers do not participate in consensus.
 
-**Block acquisition:** Followers stream blocks from a validator via a subscription RPC (`SubscribeBlocks`) or fall back to polling (`GetBlock`). Each received block includes the finalized `Block` structure and its associated message sidecar.
+**Block acquisition:** Followers stream blocks from a validator via [`SubscribeBlocks`](proto/makechain.proto#L625) or fall back to polling with [`GetBlock`](proto/makechain.proto#L594). Each received block includes the finalized `Block` structure and its associated message sidecar.
 
 **Block verification:** For each received block, a follower MUST:
 1. Verify that `consensus_finalization` is a valid finalization certificate from 2f+1 validators over the expected `proposal_digest`.
@@ -1010,7 +1012,7 @@ A **follower node** is a non-validator node that tracks the chain by streaming f
 
 **Trusted snapshot import:** When bootstrapping from a snapshot or archive, the follower MUST track import provenance (source, block height, reported state root, import timestamp). After import, the follower MUST replay blocks from the snapshot height to the chain tip, verifying each block's finalization certificate and state root, before serving queries in a production capacity.
 
-**Reconnection:** On connection loss, followers SHOULD reconnect with exponential backoff. Followers MUST detect and recover from gaps in the block stream by falling back to `GetBlock` polling from the last verified height.
+**Reconnection:** On connection loss, followers SHOULD reconnect with exponential backoff. Followers MUST detect and recover from gaps in the block stream by falling back to [`GetBlock`](proto/makechain.proto#L594) polling from the last verified height.
 
 ---
 
@@ -1079,7 +1081,7 @@ For links, verifications, reactions, and collaborators, quota accounting include
 
 The consensus layer stores only message metadata (~100-500 bytes per message). File content is stored externally.
 
-A `COMMIT_BUNDLE` may include:
+A `COMMIT_BUNDLE` message ([`CommitBundleBody`](proto/makechain.proto#L212)) may include:
 - `content_digest` — optional 32-byte integrity hash.
 - `url` — optional content locator (max 2048 characters).
 
@@ -1132,7 +1134,7 @@ Specification versions use [CalVer](https://calver.org/) (`YYYY.M.PATCH`). Each 
 
 ## Appendix B: Wire Format and Canonical Encoding
 
-The canonical wire format for all protocol messages is [Protocol Buffers v3][protobuf] as defined in `proto/makechain.proto`. This file is the normative reference for field numbers, types, and encoding.
+The canonical wire format for all protocol messages is [Protocol Buffers v3][protobuf] as defined in [`proto/makechain.proto`](proto/makechain.proto). This file is the normative reference for field numbers, types, and encoding of core structures such as [`Message`](proto/makechain.proto#L9), [`RelayPayload`](proto/makechain.proto#L448), and [`Block`](proto/makechain.proto#L497).
 
 ### B.1 Canonical Encoding Rules
 
@@ -1165,11 +1167,11 @@ The reference implementation uses Rust's `serde_json` library. Independent imple
 
 ### B.3 Block Hash
 
-Block hash: `H(canonical_encode(BlockHeader))` where `canonical_encode` follows the same protobuf determinism rules as `MessageData` encoding.
+Block hash: `H(canonical_encode(BlockHeader))` where `canonical_encode` follows the same protobuf determinism rules as [`MessageData`](proto/makechain.proto#L17) encoding; see [`BlockHeader`](proto/makechain.proto#L506).
 
 ### B.4 Proposal Digest
 
-The proposal digest committed by `consensus_finalization` is a domain-separated BLAKE3 hash of the canonical protobuf encoding of `RelayPayload`:
+The proposal digest committed by `consensus_finalization` is a domain-separated BLAKE3 hash of the canonical protobuf encoding of [`RelayPayload`](proto/makechain.proto#L448):
 
 ```
 proposal_digest(R) = H(b"makechain:relay-payload:v1" || len(wire) as uint64 LE || wire)
@@ -1177,7 +1179,7 @@ proposal_digest(R) = H(b"makechain:relay-payload:v1" || len(wire) as uint64 LE |
 
 where `wire = canonical_encode(RelayPayload_proto(R))` following the rules in B.1. The length prefix prevents ambiguity between the domain separator and the payload bytes.
 
-Field ordering within the `project_messages` repeated field is consensus-critical: entries MUST appear in byte-lexicographic order of their 32-byte `project_id`. Implementations that do not guarantee this ordering will produce a different digest and fail verification.
+Field ordering within the [`ProjectMessages`](proto/makechain.proto#L443) entries in `project_messages` is consensus-critical: entries MUST appear in byte-lexicographic order of their 32-byte `project_id`. Implementations that do not guarantee this ordering will produce a different digest and fail verification.
 
 ## Appendix C: Onchain Contract Summary (Non-Normative)
 
