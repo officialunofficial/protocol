@@ -187,9 +187,9 @@ Every message type follows one of two paradigms:
 |------|-----------|----------|----------------|------------|
 | `PROJECT_CREATE` | 1 | 2P Set | SIGNING | [`ProjectCreateBody`](proto/makechain.proto#L147) |
 | `PROJECT_METADATA` | 2 | 1P LWW | SIGNING + WRITE | [`ProjectMetadataBody`](proto/makechain.proto#L181) |
-| `PROJECT_ARCHIVE` | 3 | 1P Transition | SIGNING | `ProjectArchiveBody` |
-| `FORK` | 4 | 1P Singleton | SIGNING | `ForkBody` |
-| `PROJECT_REMOVE` | 5 | 2P Set | SIGNING | `ProjectRemoveBody` |
+| `PROJECT_ARCHIVE` | 3 | 1P Transition | SIGNING | [`ProjectArchiveBody`](proto/makechain.proto#L233) |
+| `FORK` | 4 | 1P Singleton | SIGNING | [`ForkBody`](proto/makechain.proto#L168) |
+| `PROJECT_REMOVE` | 5 | 2P Set | SIGNING | [`ProjectRemoveBody`](proto/makechain.proto#L155) |
 | `REF_UPDATE` | 10 | 2P CAS | AGENT | [`RefUpdateBody`](proto/makechain.proto#L241) |
 | `REF_DELETE` | 11 | 2P CAS | AGENT | [`RefDeleteBody`](proto/makechain.proto#L256) |
 | `SIGNER_ADD` | 14 | Custody-auth | (custody sig) | [`SignerAddBody`](proto/makechain.proto#L397) |
@@ -197,18 +197,18 @@ Every message type follows one of two paradigms:
 | `RELAY_SIGNER_ADD` | 16 | Relay | (onchain) | [`RelaySignerAddBody`](proto/makechain.proto#L422) |
 | `RELAY_SIGNER_REMOVE` | 17 | Relay | (onchain) | [`RelaySignerRemoveBody`](proto/makechain.proto#L434) |
 | `COMMIT_BUNDLE` | 20 | 1P Append | AGENT | [`CommitBundleBody`](proto/makechain.proto#L212) |
-| `COLLABORATOR_ADD` | 30 | 2P Set | SIGNING (ADMIN) | `CollaboratorAddBody` |
-| `COLLABORATOR_REMOVE` | 31 | 2P Set | SIGNING (ADMIN) | `CollaboratorRemoveBody` |
-| `ACCOUNT_DATA` | 40 | 1P LWW | SIGNING | `AccountDataBody` |
+| `COLLABORATOR_ADD` | 30 | 2P Set | SIGNING (ADMIN) | [`CollaboratorAddBody`](proto/makechain.proto#L267) |
+| `COLLABORATOR_REMOVE` | 31 | 2P Set | SIGNING (ADMIN) | [`CollaboratorRemoveBody`](proto/makechain.proto#L273) |
+| `ACCOUNT_DATA` | 40 | 1P LWW | SIGNING | [`AccountDataBody`](proto/makechain.proto#L195) |
 | `KEY_ADD` | 50 | Relay | (onchain) | [`KeyAddBody`](proto/makechain.proto#L289) |
-| `VERIFICATION_ADD` | 60 | 2P Set | SIGNING | `VerificationAddBody` |
-| `VERIFICATION_REMOVE` | 61 | 2P Set | SIGNING | `VerificationRemoveBody` |
+| `VERIFICATION_ADD` | 60 | 2P Set | SIGNING | [`VerificationAddBody`](proto/makechain.proto#L325) |
+| `VERIFICATION_REMOVE` | 61 | 2P Set | SIGNING | [`VerificationRemoveBody`](proto/makechain.proto#L332) |
 | `OWNERSHIP_TRANSFER` | 70 | Relay | (onchain) | [`OwnershipTransferBody`](proto/makechain.proto#L308) |
 | `STORAGE_RENT` | 71 | Relay | (onchain) | [`StorageRentBody`](proto/makechain.proto#L314) |
-| `LINK_ADD` | 80 | 2P Set | SIGNING | `LinkAddBody` |
-| `LINK_REMOVE` | 81 | 2P Set | SIGNING | `LinkRemoveBody` |
-| `REACTION_ADD` | 82 | 2P Set | SIGNING | `ReactionAddBody` |
-| `REACTION_REMOVE` | 83 | 2P Set | SIGNING | `ReactionRemoveBody` |
+| `LINK_ADD` | 80 | 2P Set | SIGNING | [`LinkAddBody`](proto/makechain.proto#L346) |
+| `LINK_REMOVE` | 81 | 2P Set | SIGNING | [`LinkRemoveBody`](proto/makechain.proto#L354) |
+| `REACTION_ADD` | 82 | 2P Set | SIGNING | [`ReactionAddBody`](proto/makechain.proto#L372) |
+| `REACTION_REMOVE` | 83 | 2P Set | SIGNING | [`ReactionRemoveBody`](proto/makechain.proto#L378) |
 
 ### 2.5 Content-Addressed Identifiers
 
