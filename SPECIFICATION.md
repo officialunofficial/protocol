@@ -186,7 +186,7 @@ Every message type follows one of two paradigms:
 | Type | Enum Value | Paradigm | Required Scope | Body Proto |
 |------|-----------|----------|----------------|------------|
 | `PROJECT_CREATE` | 1 | 2P Set | SIGNING | [`ProjectCreateBody`](proto/makechain.proto#L147) |
-| `PROJECT_METADATA` | 2 | 1P LWW | SIGNING + WRITE | [`ProjectMetadataBody`](proto/makechain.proto#L181) |
+| `PROJECT_METADATA` | 2 | 1P LWW | SIGNING + WRITE (`NAME`/`VISIBILITY` require ADMIN) | [`ProjectMetadataBody`](proto/makechain.proto#L181) |
 | `PROJECT_ARCHIVE` | 3 | 1P Transition | SIGNING | [`ProjectArchiveBody`](proto/makechain.proto#L233) |
 | `FORK` | 4 | 1P Singleton | SIGNING | [`ForkBody`](proto/makechain.proto#L168) |
 | `PROJECT_REMOVE` | 5 | 2P Set | SIGNING | [`ProjectRemoveBody`](proto/makechain.proto#L155) |
@@ -389,7 +389,7 @@ Dropped messages are excluded from the committed block but do not halt execution
 | `COLLABORATOR_ADD` | 2P add | `collaborator(project_id, target_mid)`, optionally clears `tombstone(collaborator(...))` |
 | `COLLABORATOR_REMOVE` | 2P remove | deletes `collaborator(project_id, target_mid)`, `tombstone(collaborator(...))` |
 | `KEY_ADD` | Relay | `key(mid, pubkey)`, `key_reverse(pubkey)`, `account(mid)` [owner_address, key_count] |
-| `OWNERSHIP_TRANSFER` | Relay | `account(mid)` [owner_address] |
+| `OWNERSHIP_TRANSFER` | Relay | `account(mid)` [owner_address], `ownership_transfer_event(event_id)` |
 | `STORAGE_RENT` | Relay | `storage_grant(mid, expires_at, event_id)`, `storage_rent_event(event_id)`, `account(mid)` [storage_units] |
 | `SIGNER_ADD` | Custody-auth | `key(mid, pubkey)`, `key_reverse(pubkey)`, `account(mid)` [custody_nonce++, key_count++] |
 | `SIGNER_REMOVE` | Custody-auth | deletes `key(mid, pubkey)`, `key_reverse(pubkey)`, `account(mid)` [custody_nonce++, key_count--] |
@@ -593,8 +593,8 @@ System messages (`KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_
 System messages MUST only enter the mempool via the local relay watcher — never from external gRPC submission or P2P gossip. All external ingress points MUST reject system message types.
 
 Verifier-side relay cross-checking is a recommended hardening measure for this draft. A verifier SHOULD confirm that each system message in the proposed `RelayPayload` corresponds to a finalized watched event in its local relay view of the host chain:
-- For `STORAGE_RENT`, `RELAY_SIGNER_ADD`, and `RELAY_SIGNER_REMOVE`, the verifier SHOULD match `relay_event_id` and verify that the projected payload fields match.
-- For `KEY_ADD` and `OWNERSHIP_TRANSFER`, the verifier SHOULD confirm that a finalized watched event exists whose canonical projection equals the proposed `MessageData` (matched by deterministic message hash).
+- For `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, and `RELAY_SIGNER_REMOVE`, the verifier SHOULD match `relay_event_id` and verify that the projected payload fields match.
+- For `KEY_ADD`, the verifier SHOULD confirm that a finalized watched event exists whose canonical projection equals the proposed `MessageData` (matched by deterministic message hash).
 
 If no such finalized event exists in the verifier's local relay view, the verifier SHOULD treat the proposal as suspicious and MAY reject it after a bounded wait for relay-view convergence. Verifiers SHOULD NOT blindly re-execute the proposer's system messages without cross-checking when host-chain evidence is available — a Byzantine proposer who controls its own RPC endpoint could otherwise fabricate system messages that honest verifiers would accept by re-execution alone.
 
@@ -759,6 +759,8 @@ A proof is valid only when its embedded root matches the current committed state
 
 Active membership in 2P sets requires two proofs against the same root: an operation proof that the entry exists, and an exclusion proof that the corresponding tombstone does not exist.
 
+The statement above describes the protocol-level proof model. In `2026.3.1`, the public proof RPC surface is intentionally narrower: it exposes collaborator, project-name, relay-signer-event, storage-grant, and storage-rent-event namespaces only. Generic tombstone exclusion proofs for all 2P-set active keys are not currently available through the public RPC allowlist.
+
 **Storage quota proof:** Authenticates the complete active storage-grant suffix for an MID at an explicit `as_of_unix_time` against the current root. Not a historical-state proof — it proves quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
 
 ### 6.4 Merkle State
@@ -787,7 +789,7 @@ These checks require no state lookups and MUST be performed before any state acc
 | `FORK` | `source_project_id`: 32 bytes; `source_commit_hash`: 32 bytes; `name`: 1-100 chars |
 | `COLLABORATOR_ADD/REMOVE` | `project_id`: 32 bytes; `target_mid ≠ 0` |
 | `KEY_ADD` | `key`: 32 bytes; `owner_address`: 20 bytes when set; `allowed_projects`: max 100 entries, each 32 bytes |
-| `OWNERSHIP_TRANSFER` | `new_owner_address`: 20 bytes; `previous_owner_address`: 20 bytes |
+| `OWNERSHIP_TRANSFER` | `new_owner_address`: 20 bytes; `previous_owner_address`: 20 bytes; `relay_event_id`: 32 bytes |
 | `VERIFICATION_ADD` | `type ≠ NONE`; `address`: 1-128 bytes; `claim_signature`: 1-1024 bytes |
 | `VERIFICATION_REMOVE` | `address`: non-empty |
 | `LINK_ADD/REMOVE` | `type ≠ NONE`; exactly one target set; target matches type |
@@ -809,13 +811,15 @@ These checks require state lookups:
 - **`PROJECT_REMOVE`:** Signer must be the project's canonical owner (`project.owner_mid == data.mid`).
 - **`PROJECT_ARCHIVE`:** Signer must be the project's canonical owner (`project.owner_mid == data.mid`).
 - **`PROJECT_CREATE`:** Account has available storage capacity; name is unique within owner's namespace.
+- **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`VERIFICATION_ADD`:** `claim_signature` is valid for the given address, type, and network.
 - **`OWNERSHIP_TRANSFER`:** Account exists; `previous_owner_address` matches current.
 - **`LINK_ADD`:** FOLLOW target must have a registered key; STAR target must exist and not be removed.
 - **`SIGNER_ADD/REMOVE`:** See Section 5.5. `SIGNER_ADD` MUST also satisfy the app-attribution checks in Section 5.6.
-- **`RELAY_SIGNER_ADD/REMOVE`:** Account exists with `owner_address`; relay event not already processed; validity window; app attribution (add only).
+- **`RELAY_SIGNER_ADD`:** Account exists with `owner_address`; relay event not already processed; validity window; app attribution.
+- **`RELAY_SIGNER_REMOVE`:** Account exists with `owner_address`; relay event not already processed. No validity window or app attribution fields are carried on the wire for remove.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
-- **`STORAGE_RENT`:** Account exists; relay event not already processed.
+- **`STORAGE_RENT`:** Account exists; relay event not already processed. For this rule, a MID with an existing `account(mid)` row or at least one registered key counts as an existing logical account.
 
 ---
 
@@ -957,13 +961,13 @@ Relay messages derive trust from chain finality and state root consensus, not fr
 
 ### 9.3 Determinism and Replay Protection
 
-`KEY_ADD` and `OWNERSHIP_TRANSFER` collapse under message-hash deduplication when payloads are identical. `STORAGE_RENT`, `RELAY_SIGNER_ADD`, and `RELAY_SIGNER_REMOVE` include a deterministic `relay_event_id`:
+`KEY_ADD` continues to collapse under message-hash deduplication when payloads are identical. `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, and `RELAY_SIGNER_REMOVE` include a deterministic `relay_event_id`:
 
 ```
 relay_event_id = H(b"relay-log-v1" | BE(block_number, 8) | BE(tx_index, 8) | BE(log_index, 8))
 ```
 
-Validators persist `relay_event_id` after first successful application so duplicate delivery is idempotent.
+Validators persist `relay_event_id` after first successful application so duplicate delivery of the same finalized ownership transfer, rent, or signer relay event is idempotent.
 
 ### 9.4 Verification Claims
 
@@ -1008,7 +1012,7 @@ A **follower node** is a non-validator node that tracks the chain by streaming f
 
 **State replay:** After verification, the follower applies the block's state changeset to its local state store. Followers MUST use the same two-phase commit protocol as validators (apply state changeset, then persist block entry) with crash-safe journaling.
 
-**Write forwarding:** A follower MAY proxy write requests (message submission) to an upstream validator via `--write-forward-to`. This is a deployment concern — the upstream validator performs mempool insertion and consensus participation.
+**Write forwarding:** A follower MAY proxy write requests (message submission) to an upstream validator via `--write-forward-to`. This is a deployment concern — the upstream validator performs mempool insertion and consensus participation. The follower remains an external ingress point and therefore MUST still reject system message types locally before forwarding the rest of the batch or request upstream.
 
 **Trusted snapshot import:** When bootstrapping from a snapshot or archive, the follower MUST track import provenance (source, block height, reported state root, import timestamp). After import, the follower MUST replay blocks from the snapshot height to the chain tip, verifying each block's finalization certificate and state root, before serving queries in a production capacity.
 
@@ -1229,7 +1233,7 @@ For each account, `counter(mid, 0x01)` equals the count of active link entries f
 For every forward entry under prefixes `0x06`, `0x10`, `0x12`, the corresponding reverse index entry under `0x07`, `0x11`, `0x13` (respectively) MUST exist, and vice versa. Handlers MUST atomically maintain both forward and reverse entries.
 
 ### INV-11: Relay Event Idempotence
-Once a `relay_event_id` is persisted under prefix `0x08` or `0x17`, any subsequent system message carrying the same `relay_event_id` MUST be a no-op. This prevents duplicate application of finalized host-chain events after restart, GC, or backfill.
+Once a `relay_event_id` is persisted under prefix `0x08`, `0x17`, or `0x1A`, any subsequent system message carrying the same `relay_event_id` MUST be a no-op. This prevents duplicate application of finalized host-chain events after restart, GC, or backfill.
 
 ## Appendix E: Genesis State
 
