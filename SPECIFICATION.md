@@ -8,7 +8,7 @@
 
 A specialized protocol built for making things.
 
-**Version:** 2026.3.1
+**Version:** 2026.3.2
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every message is self-authenticating: verifiable from canonical state alone, no external lookups required.
 
@@ -185,7 +185,7 @@ Every message type follows one of two paradigms:
 
 | Type | Enum Value | Paradigm | Required Scope | Body Proto |
 |------|-----------|----------|----------------|------------|
-| `PROJECT_CREATE` | 1 | 2P Set | SIGNING | [`ProjectCreateBody`](proto/makechain.proto#L147) |
+| `PROJECT_CREATE` | 1 | 2P Set † | SIGNING | [`ProjectCreateBody`](proto/makechain.proto#L147) |
 | `PROJECT_METADATA` | 2 | 1P LWW | SIGNING + WRITE (`NAME`/`VISIBILITY` require ADMIN) | [`ProjectMetadataBody`](proto/makechain.proto#L181) |
 | `PROJECT_ARCHIVE` | 3 | 1P Transition | SIGNING | [`ProjectArchiveBody`](proto/makechain.proto#L233) |
 | `FORK` | 4 | 1P Singleton | SIGNING | [`ForkBody`](proto/makechain.proto#L168) |
@@ -209,6 +209,8 @@ Every message type follows one of two paradigms:
 | `LINK_REMOVE` | 81 | 2P Set | SIGNING | [`LinkRemoveBody`](proto/makechain.proto#L354) |
 | `REACTION_ADD` | 82 | 2P Set | SIGNING | [`ReactionAddBody`](proto/makechain.proto#L372) |
 | `REACTION_REMOVE` | 83 | 2P Set | SIGNING | [`ReactionRemoveBody`](proto/makechain.proto#L378) |
+
+† `PROJECT_CREATE` is paired with `PROJECT_REMOVE` as a 2P Set, but does not follow the generic `apply_2p_add` re-add path because `project_id` is content-addressed (Section 2.5). See Section 4.2 for the specific semantics.
 
 ### 2.5 Content-Addressed Identifiers
 
@@ -403,6 +405,8 @@ Dropped messages are excluded from the committed block but do not halt execution
 | `REACTION_REMOVE` | 2P remove | deletes `reaction(...)`, `reaction_reverse(...)`, `tombstone(reaction(...))`, `counter(mid, 0x02)` |
 
 Key names reference Section 6.1 prefixes. 2P add/remove handlers also interact with prune markers (`0x15`) during quota pruning (Section 11.4). `MessageType::None` returns `Err`.
+
+**Project identity and 2P set semantics.** Although `PROJECT_CREATE` and `PROJECT_REMOVE` are listed as 2P Set add/remove pairs, projects do not follow the generic `apply_2p_add` re-add path from Section 4.4.2. This is a consequence of content-addressed identity: `project_id = H(MessageData)` (Section 2.5), so every fresh `PROJECT_CREATE` message produces a unique `project_id`. There is no way to construct a new `PROJECT_CREATE` that targets an existing project's identity. A `PROJECT_CREATE` whose derived `project_id` matches an existing project entry MUST be rejected regardless of the project's current status. `PROJECT_ARCHIVE` is a terminal state transition — archived projects cannot be reverted to `Active`, but they can be forked or subsequently removed.
 
 ### 4.3 Timestamp Validation
 
@@ -761,7 +765,7 @@ Active membership in 2P sets requires two proofs against the same root: an opera
 
 The statement above describes the protocol-level proof model. In `2026.3.1`, the public proof RPC surface is intentionally narrower: it exposes collaborator, project-name, relay-signer-event, storage-grant, and storage-rent-event namespaces only. Generic tombstone exclusion proofs for all 2P-set active keys are not currently available through the public RPC allowlist.
 
-**Storage quota proof:** Authenticates the complete active storage-grant suffix for an MID at an explicit `as_of_unix_time` against the current root. Not a historical-state proof — it proves quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
+**Storage quota proof:** Authenticates the complete active storage-grant suffix for an MID at an explicit `as_of_unix_time` against the current root. A grant is **active** at time `T` if and only if `expires_at > T`. Because the storage grant key layout (Section 6.1, prefix `0x16`) embeds `expires_at` in big-endian immediately after the MID, all grants for a given MID are sorted by expiration time in ascending order, enabling efficient range-based proof construction. Not a historical-state proof — it proves quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
 
 ### 6.4 Merkle State
 
@@ -779,20 +783,21 @@ These checks require no state lookups and MUST be performed before any state acc
 
 | Type | Constraints |
 |------|------------|
-| `PROJECT_CREATE` | `name`: 1-100 chars, `[a-zA-Z0-9-]`, no leading/trailing hyphens |
+| `PROJECT_CREATE` | `name`: 1-100 chars, `[a-zA-Z0-9-]`, no leading/trailing hyphens; `description` ≤ 500 bytes; `license` ≤ 100 bytes |
 | `PROJECT_REMOVE`, `PROJECT_ARCHIVE` | `project_id`: 32 bytes |
 | `PROJECT_METADATA` | `project_id`: 32 bytes; `field ≠ NONE`; `value` ≤ 500 chars; `NAME` values follow project-name syntax; `VISIBILITY` values are exactly `public` or `private` |
 | `ACCOUNT_DATA` | `field ≠ NONE`; `value` ≤ 500 chars; `USERNAME`: `[a-zA-Z0-9_-]`, max 30 chars |
-| `REF_UPDATE` | `project_id`: 32 bytes; `ref_name`: 1-254 bytes, no `0x00`; `new_hash`: 32 bytes; `old_hash`: 32 bytes when set |
-| `REF_DELETE` | `project_id`: 32 bytes; `ref_name`: 1-254 bytes, no `0x00`; `expected_hash`: 32 bytes when set |
+| `REF_UPDATE` | `project_id`: 32 bytes; `ref_name`: 1-254 bytes, no `0x00`; `new_hash`: 32 bytes; `old_hash`: 32 bytes when set; `ref_type`: valid enum; `nonce ≥ 1` |
+| `REF_DELETE` | `project_id`: 32 bytes; `ref_name`: 1-254 bytes, no `0x00`; `expected_hash`: 32 bytes when set; `nonce ≥ 1` |
 | `COMMIT_BUNDLE` | `project_id`: 32 bytes; 1-1000 commits; `content_digest`: 32 bytes when set; `url` ≤ 2048 chars, no control chars; each commit: `hash` 32 bytes, `tree_root` 32 bytes, `message_hash` 32 bytes, each parent hash 32 bytes; `title` ≤ 200 chars |
 | `FORK` | `source_project_id`: 32 bytes; `source_commit_hash`: 32 bytes; `name`: 1-100 chars |
-| `COLLABORATOR_ADD/REMOVE` | `project_id`: 32 bytes; `target_mid ≠ 0` |
+| `COLLABORATOR_ADD` | `project_id`: 32 bytes; `target_mid ≠ 0`; `permission`: valid enum |
+| `COLLABORATOR_REMOVE` | `project_id`: 32 bytes; `target_mid ≠ 0` |
 | `KEY_ADD` | `key`: 32 bytes; `owner_address`: 20 bytes when set; `allowed_projects`: max 100 entries, each 32 bytes |
 | `OWNERSHIP_TRANSFER` | `new_owner_address`: 20 bytes; `previous_owner_address`: 20 bytes; `relay_event_id`: 32 bytes |
-| `VERIFICATION_ADD` | `type ≠ NONE`; `address`: 1-128 bytes; `claim_signature`: 1-1024 bytes |
-| `VERIFICATION_REMOVE` | `address`: non-empty |
-| `LINK_ADD/REMOVE` | `type ≠ NONE`; exactly one target set; target matches type |
+| `VERIFICATION_ADD` | `type ≠ NONE`; `address`: 1-128 bytes; `chain_id` ≤ 32 bytes; `claim_signature`: 1-1024 bytes |
+| `VERIFICATION_REMOVE` | `address`: 1-128 bytes |
+| `LINK_ADD/REMOVE` | `type ≠ NONE`; exactly one target set; target matches type; FOLLOW: `target_mid ≠ 0`; STAR: `target_project_id`: 32 bytes |
 | `SIGNER_ADD` | `key`: 32 bytes; valid scope; custody sig: 65 bytes (type 0/1) or 107-2048 bytes (type 2); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 2; `request_mid ≠ 0`; request sig: 65 bytes (type 0/1) or 107-2048 bytes (type 2); `request_key_type` ≤ 2; `allowed_projects`: max 100 entries, each 32 bytes (agent scope only) |
 | `SIGNER_REMOVE` | `key`: 32 bytes; custody sig size; `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 2 |
 | `RELAY_SIGNER_ADD` | `key`: 32 bytes; valid scope; `request_mid ≠ 0`; request sig size; `relay_event_id`: 32 bytes; validity window checks; `allowed_projects`: max 100 entries, each 32 bytes (agent scope only) |
@@ -1121,11 +1126,14 @@ Specification versions use [CalVer](https://calver.org/) (`YYYY.M.PATCH`). Each 
 | `MAX_COMMITS_PER_PROJECT` | 10,000 | Commit metadata limit before pruning |
 | `MAX_REFS_PER_PROJECT` | 200 | Maximum refs per project |
 | `MAX_KEYS_PER_ACCOUNT` | 1,000 | Maximum keys per account |
+| `MAX_DESCRIPTION_LEN` | 500 bytes | Maximum project description length |
+| `MAX_LICENSE_LEN` | 100 bytes | Maximum project license length |
 | `MAX_VALUE_LEN` | 500 chars | Maximum metadata value length |
 | `MAX_TITLE_LEN` | 200 chars | Maximum commit title length |
 | `MAX_URL_LEN` | 2,048 chars | Maximum content URL length |
 | `MAX_CLAIM_SIGNATURE_LEN` | 1,024 bytes | Maximum verification claim signature |
 | `MAX_ADDRESS_LEN` | 128 bytes | Maximum verification address length |
+| `MAX_CHAIN_ID_LEN` | 32 bytes | Maximum verification chain ID length |
 | `MEMPOOL_CAPACITY` | 100,000 | Default mempool capacity |
 | `MAX_BLOCK_MESSAGES` | 10,000 | Default max messages per block |
 | `MAX_PROJECT_MESSAGES` | 500 | Default max messages per project per block |
@@ -1249,6 +1257,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.3.2 | 2026-03-30 | Add missing structural validation limits. Clarify project content-addressed identity and 2P semantics. Clarify storage quota proof active-grant definition and key ordering property. |
 | 2026.3.1 | 2026-03-26 | Add versioning policy, diagrams, references section. |
 | 2026.3.0 | 2026-03-01 | Restructure for protocol-level rigor. Add relay payload commitment, follower nodes, storage rent, quota pruning, correctness invariants, canonical encoding appendix. |
 | 2026.2.0 | 2026-02-01 | Initial draft. |
