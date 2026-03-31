@@ -1257,7 +1257,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2026.3.2 | 2026-03-30 | Add missing structural validation limits (#274). Clarify project content-addressed identity and 2P semantics (#277). Clarify storage quota proof active-grant definition and key ordering property (#278). |
+| 2026.3.2 | 2026-03-30 | Add missing structural validation limits. Clarify project content-addressed identity and 2P semantics. Clarify storage quota proof active-grant definition and key ordering property. |
 | 2026.3.1 | 2026-03-26 | Add versioning policy, diagrams, references section. |
 | 2026.3.0 | 2026-03-01 | Restructure for protocol-level rigor. Add relay payload commitment, follower nodes, storage rent, quota pruning, correctness invariants, canonical encoding appendix. |
 | 2026.2.0 | 2026-02-01 | Initial draft. |
