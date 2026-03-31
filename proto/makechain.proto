@@ -308,7 +308,7 @@ enum KeyScope {
 message OwnershipTransferBody {
   bytes new_owner_address      = 1;  // 20-byte EVM address of the new owner
   bytes previous_owner_address = 2;  // 20-byte EVM address of the previous owner (defense-in-depth)
-  bytes relay_event_id         = 3;  // BLAKE3(domain || block_number || tx_index || log_index), 32 bytes when set
+  bytes relay_event_id         = 3;  // BLAKE3(domain || block_number || tx_index || log_index), 32 bytes
 }
 
 message StorageRentBody {
@@ -445,6 +445,11 @@ message ProjectMessages {
   repeated Message messages = 2;
 }
 
+message RelayCheckpoint {
+  uint64 tempo_block_number = 1;
+  bytes tempo_block_hash = 2;            // 32 bytes
+}
+
 message RelayPayload {
   bytes digest = 1;                          // BLAKE3 state root, 32 bytes
   repeated Message account_messages = 2;
@@ -454,6 +459,7 @@ message RelayPayload {
   bytes parent_hash = 6;                     // 32 bytes previous block hash
   uint32 chain_id = 7;                       // proto::Network enum value
   uint32 version = 8;                        // block header version
+  RelayCheckpoint relay_checkpoint = 9;
 }
 
 message SubblockPayload {
@@ -510,6 +516,7 @@ message BlockHeader {
   Network chain_id         = 4;
   bytes parent_hash        = 5;
   bytes state_root         = 6;
+  RelayCheckpoint relay_checkpoint = 7;
 }
 
 message ShardWitness {
@@ -941,6 +948,20 @@ message GetSnapshotInfoResponse {
 
 message GetNodeStatusRequest {}
 
+enum ReplayVerificationStatus {
+  REPLAY_VERIFICATION_STATUS_UNSPECIFIED = 0;
+  REPLAY_VERIFICATION_STATUS_VERIFIED = 1;
+  REPLAY_VERIFICATION_STATUS_TRUSTED_SNAPSHOT = 2;
+  REPLAY_VERIFICATION_STATUS_BLOCKED_WAITING_RELAY_EVIDENCE = 3;
+}
+
+message ReplayVerificationInfo {
+  ReplayVerificationStatus status = 1;
+  string detail = 2;
+  uint64 blocked_block_number = 3;
+  bool waiting_on_relay_evidence = 4;
+}
+
 message GetNodeStatusResponse {
   uint64 current_block = 1;       // Latest committed block number
   uint32 mempool_size = 2;        // Number of messages in the mempool
@@ -950,6 +971,7 @@ message GetNodeStatusResponse {
   uint64 uptime_secs = 6;         // Seconds since node started
   uint64 total_messages = 7;      // Cumulative messages committed (survives GC)
   uint32 state_entries = 8;       // Number of entries in the state store
+  ReplayVerificationInfo replay_verification = 9;
 }
 
 // --- Chain Stats ---
@@ -1122,6 +1144,7 @@ message GetHealthResponse {
   bool ready = 2;            // True if the node has loaded state and can serve queries
   uint64 current_block = 3;  // Latest committed block number (0 if not ready)
   uint64 uptime_secs = 4;    // Seconds since node started
+  ReplayVerificationInfo replay_verification = 5;
 }
 
 // --- Dry Run ---

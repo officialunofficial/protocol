@@ -8,7 +8,7 @@
 
 A specialized protocol built for making things.
 
-**Version:** 2026.3.2
+**Version:** 2026.3.3
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every message is self-authenticating: verifiable from canonical state alone, no external lookups required.
 
@@ -754,7 +754,7 @@ This leaves 287 usable bytes. The maximum `ref_name` length is 254 bytes (prefix
 
 The state store supports two proof types, both anchored to a committed state root:
 
-The public proof RPC surface for these queries is [`GetOperationProof`](proto/makechain.proto#L635), [`GetExclusionProof`](proto/makechain.proto#L636), [`VerifyOperationProof`](proto/makechain.proto#L637), and [`GetStorageQuotaProof`](proto/makechain.proto#L638).
+The public proof RPC surface for these queries is [`GetOperationProof`](proto/makechain.proto#L642), [`GetExclusionProof`](proto/makechain.proto#L643), [`VerifyOperationProof`](proto/makechain.proto#L644), and [`GetStorageQuotaProof`](proto/makechain.proto#L645).
 
 - **Operation proof** — proves a key-value pair exists at a given root (Merkle inclusion path).
 - **Exclusion proof** — proves a key does NOT exist at a given root (neighboring key boundary).
@@ -763,7 +763,7 @@ A proof is valid only when its embedded root matches the current committed state
 
 Active membership in 2P sets requires two proofs against the same root: an operation proof that the entry exists, and an exclusion proof that the corresponding tombstone does not exist.
 
-The statement above describes the protocol-level proof model. In `2026.3.1`, the public proof RPC surface is intentionally narrower: it exposes collaborator, project-name, relay-signer-event, storage-grant, and storage-rent-event namespaces only. Generic tombstone exclusion proofs for all 2P-set active keys are not currently available through the public RPC allowlist.
+The statement above describes the protocol-level proof model. In `2026.3.3`, the public proof RPC surface is intentionally narrower: it exposes collaborator, project-name, relay-signer-event, storage-grant, and storage-rent-event namespaces only. Generic tombstone exclusion proofs for all 2P-set active keys are not currently available through the public RPC allowlist.
 
 **Storage quota proof:** Authenticates the complete active storage-grant suffix for an MID at an explicit `as_of_unix_time` against the current root. A grant is **active** at time `T` if and only if `expires_at > T`. Because the storage grant key layout (Section 6.1, prefix `0x16`) embeds `expires_at` in big-endian immediately after the MID, all grants for a given MID are sorted by expiration time in ascending order, enabling efficient range-based proof construction. Not a historical-state proof — it proves quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
 
@@ -816,11 +816,11 @@ These checks require state lookups:
 - **`PROJECT_REMOVE`:** Signer must be the project's canonical owner (`project.owner_mid == data.mid`).
 - **`PROJECT_ARCHIVE`:** Signer must be the project's canonical owner (`project.owner_mid == data.mid`).
 - **`PROJECT_CREATE`:** Account has available storage capacity; name is unique within owner's namespace.
-- **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`VERIFICATION_ADD`:** `claim_signature` is valid for the given address, type, and network.
 - **`OWNERSHIP_TRANSFER`:** Account exists; `previous_owner_address` matches current.
 - **`LINK_ADD`:** FOLLOW target must have a registered key; STAR target must exist and not be removed.
 - **`SIGNER_ADD/REMOVE`:** See Section 5.5. `SIGNER_ADD` MUST also satisfy the app-attribution checks in Section 5.6.
+- **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`RELAY_SIGNER_ADD`:** Account exists with `owner_address`; relay event not already processed; validity window; app attribution.
 - **`RELAY_SIGNER_REMOVE`:** Account exists with `owner_address`; relay event not already processed. No validity window or app attribution fields are carried on the wire for remove.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
@@ -860,12 +860,25 @@ BlockHeader {
   chain_id:    Network
   parent_hash: bytes(32)            // H(previous block header)
   state_root:  bytes(32)            // Merkle root after execution
+  relay_checkpoint: RelayCheckpoint // Finalized Tempo frontier anchor
 }
 ```
 
-The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](proto/makechain.proto). The corresponding protobuf messages are [`Block`](proto/makechain.proto#L497), [`BlockHeader`](proto/makechain.proto#L506), and [`RelayPayload`](proto/makechain.proto#L448).
+`BlockHeader.relay_checkpoint` is committed on every block and carries a finalized Tempo reference:
 
-`consensus_finalization` commits to the digest of the associated [`RelayPayload`](proto/makechain.proto#L448), which is the canonical execution input:
+- `tempo_block_number`
+- `tempo_block_hash`
+
+When no finalized Tempo frontier has yet been committed, implementations MUST use the zero sentinel checkpoint:
+
+- `tempo_block_number = 0`
+- `tempo_block_hash = [0; 32]`
+
+The proposer also includes the same `relay_checkpoint` in the consensus relay payload used for proposal/finalization digest agreement. Persisted-block verification reconstructs that payload from the stored `Block` plus streamed messages, so the header and relay payload must carry the same checkpoint.
+
+The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](proto/makechain.proto). The corresponding protobuf messages are [`Block`](proto/makechain.proto#L503), [`BlockHeader`](proto/makechain.proto#L512), and [`RelayPayload`](proto/makechain.proto#L453).
+
+`consensus_finalization` commits to the digest of the associated [`RelayPayload`](proto/makechain.proto#L453), which is the canonical execution input:
 
 ```
 RelayPayload {
@@ -877,10 +890,11 @@ RelayPayload {
   parent_hash:       bytes(32)
   chain_id:          uint32
   version:           uint32
+  relay_checkpoint:  RelayCheckpoint  // Must match BlockHeader.relay_checkpoint
 }
 ```
 
-The finalized block header authenticates the post-execution state root; the finalized payload authenticates the exact executed message sequence. `proposal_digest(R)` refers to the hash of the canonical [`RelayPayload`](proto/makechain.proto#L448) encoding, not to the `digest` field inside `R`.
+The finalized block header authenticates the post-execution state root; the finalized payload authenticates the exact executed message sequence. `proposal_digest(R)` refers to the hash of the canonical [`RelayPayload`](proto/makechain.proto#L453) encoding, not to the `digest` field inside `R`.
 
 #### Proposal Digest Construction
 
@@ -892,14 +906,14 @@ proposal_digest(R) = H(b"makechain:relay-payload:v1" || len(wire) as uint64 LE |
 ```
 
 Where:
-- `RelayPayload_proto(R)` converts the logical `RelayPayload` to its Protocol Buffers message form (field numbers as defined on [`RelayPayload`](proto/makechain.proto#L448) in [`proto/makechain.proto`](proto/makechain.proto): `digest`=1, `account_messages`=2, `project_messages`=3, `timestamp`=4, `block_number`=5, `parent_hash`=6, `chain_id`=7, `version`=8).
+- `RelayPayload_proto(R)` converts the logical `RelayPayload` to its Protocol Buffers message form (field numbers as defined on [`RelayPayload`](proto/makechain.proto#L453) in [`proto/makechain.proto`](proto/makechain.proto): `digest`=1, `account_messages`=2, `project_messages`=3, `timestamp`=4, `block_number`=5, `parent_hash`=6, `chain_id`=7, `version`=8, `relay_checkpoint`=9).
 - `canonical_encode` follows the determinism rules in Appendix B.1.
 - `len(wire)` is the byte length of the encoded protobuf, serialized as an 8-byte unsigned little-endian integer.
 - The domain separator `b"makechain:relay-payload:v1"` prevents cross-protocol hash collisions.
 
 The [`ProjectMessages`](proto/makechain.proto#L443) entries in `project_messages` MUST be ordered by byte-lexicographic `project_id`, matching the `BTreeMap` iteration order in the reference implementation.
 
-Persisted block verification therefore requires both the finalized [`Block`](proto/makechain.proto#L497) and the associated ordered message stream sufficient to reconstruct the committed [`RelayPayload`](proto/makechain.proto#L448). A sync provider serving historical blocks MUST also serve the corresponding message stream, and a syncing node MUST verify that reconstructing `RelayPayload` from `(Block, messages)` yields the payload digest committed by `consensus_finalization`.
+Persisted block verification therefore requires both the finalized [`Block`](proto/makechain.proto#L503) and the associated ordered message stream sufficient to reconstruct the committed [`RelayPayload`](proto/makechain.proto#L453). A sync provider serving historical blocks MUST also serve the corresponding message stream, and a syncing node MUST verify that reconstructing `RelayPayload` from `(Block, messages)` yields the payload digest committed by `consensus_finalization`.
 
 The `proposal_digest(R)` value is what validators sign in finalization certificates. The domain separator `b"makechain:relay-payload:v1"` serves as the commitment version identifier. Future commitment format changes MUST use a new domain separator (e.g., `v2`) and require explicit activation semantics. A future protocol version SHOULD define a dedicated, transport-independent commitment structure rather than deriving the consensus commitment from the protobuf wire encoding of `RelayPayload`. A stable commitment schema would make the consensus-critical surface explicitly versioned, transport-independent, and clearer to evolve safely.
 
@@ -927,30 +941,14 @@ Pending messages are held in a mempool with:
 
 ### 9.1 Relay Model
 
-```mermaid
-sequenceDiagram
-    participant L1 as EVM L1
-    participant RW as Relay Watcher
-    participant MP as Mempool
-    participant BFT as Consensus
+1. Polls `eth_getLogs` with a topic0 filter matching the relayed event signatures across all watched addresses
+2. Merges the returned logs into a single canonical order by `(block_number, transaction_index, log_index)`
+3. Decodes events and converts them to `MessageData` (mapping to `KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, or `RELAY_SIGNER_REMOVE`)
+4. Builds **unsigned system messages** — empty `signer` and `signature`, hash is purely `BLAKE3(MessageData)` (deterministic across all validators)
+5. Publishes the latest safe finalized Tempo frontier as `relay_checkpoint = { tempo_block_number, tempo_block_hash }`
+6. Submits relay messages to the local mempool (replay protection via the bounded in-memory `message_index`)
 
-    L1->>RW: eth_getLogs (finalized)
-    RW->>RW: Decode log → MessageData
-    RW->>RW: H(canonical_encode(data)) → hash
-    RW->>MP: Unsigned system message
-    MP->>BFT: Include in block proposal
-    BFT->>BFT: Execute + finalize
-```
-
-Each validator runs a relay watcher that monitors finalized events on the host chain:
-
-1. Poll `eth_getLogs` for watched contract addresses.
-2. Merge logs into canonical order: `(block_number, transaction_index, log_index)`.
-3. Decode events into `MessageData`.
-4. Build **unsigned system messages** — empty `signer`/`signature`, hash is `H(canonical_encode(data))`.
-5. Submit to local mempool with replay protection.
-
-Relay messages derive trust from chain finality and state root consensus, not from validator signatures. Because the hash is deterministic (no signer variance), all validators produce identical messages for the same onchain event, ensuring consensus agreement. `KEY_ADD` continues to collapse semantically under message-hash deduplication when finalized payloads are identical. `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, and `RELAY_SIGNER_REMOVE` include a deterministic `relay_event_id = BLAKE3(domain || block_number || transaction_index || log_index)`, so same-payload finalized logs at different chain positions remain distinct and preserve the intended per-log state transitions. Validators also persist `relay_event_id` after first successful application so duplicate delivery of the same finalized ownership transfer, rent, or signer relay event becomes a no-op.
+Relay messages derive trust from chain finality and state root consensus, not from validator signatures. Because the hash is deterministic (no signer variance), all validators produce identical messages for the same onchain event, ensuring consensus agreement. `KEY_ADD` continues to collapse semantically under message-hash deduplication when finalized payloads are identical. `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, and `RELAY_SIGNER_REMOVE` include a deterministic `relay_event_id = BLAKE3(domain || block_number || transaction_index || log_index)`, so same-payload finalized logs at different chain positions remain distinct and preserve the intended per-log state transitions. Validators also persist `relay_event_id` after first successful application so duplicate delivery of the same finalized ownership transfer, rent, or signer relay event becomes a no-op. Proposers snapshot the latest published finalized Tempo frontier and commit it as `relay_checkpoint` on every block, making relay-derived system-message eligibility depend on a shared Tempo reference rather than local watcher timing.
 
 **System message timestamps:** The `timestamp` field on system messages MUST be the host-chain block timestamp of the event being relayed. Relay watchers MUST NOT substitute any alternative timestamp (e.g., wall-clock time) — doing so breaks cross-validator hash determinism. If the host-chain block timestamp cannot be resolved (RPC failure), the event MUST be retried, not submitted with an approximation. System messages are subject to the future-drift check (Section 4.3) but are NOT subject to the storage-sensitive past-age check (they are not user-submitted types).
 
@@ -974,7 +972,43 @@ relay_event_id = H(b"relay-log-v1" | BE(block_number, 8) | BE(tx_index, 8) | BE(
 
 Validators persist `relay_event_id` after first successful application so duplicate delivery of the same finalized ownership transfer, rent, or signer relay event is idempotent.
 
-### 9.4 Verification Claims
+### 9.4 Replay Verification Semantics
+
+Persisted-block replay verification is tri-state:
+
+- `Valid` — structural validation, finalization binding, and any required relay-backed checks succeeded
+- `Invalid` — the stored history is contradictory or malformed and must fail closed
+- `NotYetVerifiable` — the block is structurally sound, but required finalized Tempo evidence is not currently available locally or via configured relay RPC access
+
+Relay-backed replay verification evaluates relay-derived system messages against finalized Tempo data under the block's committed `relay_checkpoint`. Tempo evidence is bound to both `tempo_block_number` and `tempo_block_hash`; replay verification must not rely on block number alone.
+
+For this workstream:
+
+- `STORAGE_RENT`, `RELAY_SIGNER_ADD`, `RELAY_SIGNER_REMOVE`, and upgraded `OWNERSHIP_TRANSFER` are matched against finalized relay events reconstructed from Tempo logs
+- `KEY_ADD` uses bounded matching against finalized `MidRegistered` semantics at or before the committed checkpoint rather than exact per-event provenance
+
+`relay_checkpoint` is a finalized frontier anchor, not a full provenance proof by itself. Replay verification may need to search finalized logs older than the checkpoint tip to reconstruct the matching relay-derived message.
+
+### 9.5 Operator-Visible Status
+
+Replay-verification blocking is surfaced additively through `GetHealth` and `GetNodeStatus` via `ReplayVerificationInfo`:
+
+- `status`
+- `detail`
+- `blocked_block_number`
+- `waiting_on_relay_evidence`
+
+`ReplayVerificationInfo.status` has three protocol-visible values:
+
+- `VERIFIED` — replay verification is complete for the local durable state. This covers both a freshly verified node and a node that completed replay after trusted snapshot import.
+- `TRUSTED_SNAPSHOT` — the node restored state from trusted snapshot provenance and still requires replay-backed verification before replay-sensitive trust is fully restored.
+- `BLOCKED_WAITING_RELAY_EVIDENCE` — replay verification is currently blocked because required finalized Tempo evidence is not available through the local relay view or configured replay-verification RPC access.
+
+Existing `GetHealth.ready` / `/readyz` semantics are preserved: `ready` still means the node has loaded local state and can serve ordinary queries. A node may therefore be `ready = true` while replay verification is `TRUSTED_SNAPSHOT` or `BLOCKED_WAITING_RELAY_EVIDENCE`.
+
+Replay-sensitive surfaces MUST still fail closed until replay verification is `VERIFIED`. This includes verified sync-target acquisition, verified snapshot or archive export, and snapshot-fence-backed `GetSnapshotInfo` responses.
+
+### 9.6 Verification Claims
 
 **ETH_ADDRESS** — EIP-712 typed-data signature:
 ```
@@ -999,14 +1033,14 @@ Messages accepted into the local mempool are forwarded to all connected validato
 ### 10.3 Sync
 
 New nodes joining the network:
-1. **State sync** — proof-verified download of the current state from a peer via [`GetSyncTarget`](proto/makechain.proto#L628) and [`SyncFetch`](proto/makechain.proto#L629).
-2. **Block sync** — replay missed finalized `(Block, messages)` pairs from the state sync height to the current tip via [`SyncBlocks`](proto/makechain.proto#L632). The `messages` sidecar is consensus-critical because it carries the account-message order and, together with the block's project transactions, reconstructs the committed `RelayPayload`.
+1. **State sync** — proof-verified download of the current state from a peer via [`GetSyncTarget`](proto/makechain.proto#L635) and [`SyncFetch`](proto/makechain.proto#L636).
+2. **Block sync** — replay missed finalized `(Block, messages)` pairs from the state sync height to the current tip via [`SyncBlocks`](proto/makechain.proto#L639). The `messages` sidecar is consensus-critical because it carries the account-message order and, together with the block's project transactions, reconstructs the committed `RelayPayload`.
 
 ### 10.4 Follower Nodes
 
 A **follower node** is a non-validator node that tracks the chain by streaming finalized blocks from one or more validators, replaying state transitions, and serving read queries. Followers do not participate in consensus.
 
-**Block acquisition:** Followers stream blocks from a validator via [`SubscribeBlocks`](proto/makechain.proto#L625) or fall back to polling with [`GetBlock`](proto/makechain.proto#L594). Each received block includes the finalized `Block` structure and its associated message sidecar.
+**Block acquisition:** Followers stream blocks from a validator via [`SubscribeBlocks`](proto/makechain.proto#L632) or fall back to polling with [`GetBlock`](proto/makechain.proto#L601). Each received block includes the finalized `Block` structure and its associated message sidecar.
 
 **Block verification:** For each received block, a follower MUST:
 1. Verify that `consensus_finalization` is a valid finalization certificate from 2f+1 validators over the expected `proposal_digest`.
@@ -1021,7 +1055,7 @@ A **follower node** is a non-validator node that tracks the chain by streaming f
 
 **Trusted snapshot import:** When bootstrapping from a snapshot or archive, the follower MUST track import provenance (source, block height, reported state root, import timestamp). After import, the follower MUST replay blocks from the snapshot height to the chain tip, verifying each block's finalization certificate and state root, before serving queries in a production capacity.
 
-**Reconnection:** On connection loss, followers SHOULD reconnect with exponential backoff. Followers MUST detect and recover from gaps in the block stream by falling back to [`GetBlock`](proto/makechain.proto#L594) polling from the last verified height.
+**Reconnection:** On connection loss, followers SHOULD reconnect with exponential backoff. Followers MUST detect and recover from gaps in the block stream by falling back to [`GetBlock`](proto/makechain.proto#L601) polling from the last verified height.
 
 ---
 
@@ -1128,9 +1162,9 @@ Specification versions use [CalVer](https://calver.org/) (`YYYY.M.PATCH`). Each 
 | `MAX_KEYS_PER_ACCOUNT` | 1,000 | Maximum keys per account |
 | `MAX_DESCRIPTION_LEN` | 500 bytes | Maximum project description length |
 | `MAX_LICENSE_LEN` | 100 bytes | Maximum project license length |
-| `MAX_VALUE_LEN` | 500 chars | Maximum metadata value length |
-| `MAX_TITLE_LEN` | 200 chars | Maximum commit title length |
-| `MAX_URL_LEN` | 2,048 chars | Maximum content URL length |
+| `MAX_VALUE_LEN` | 500 bytes | Maximum metadata value length |
+| `MAX_TITLE_LEN` | 200 bytes | Maximum commit title length |
+| `MAX_URL_LEN` | 2,048 bytes | Maximum content URL length |
 | `MAX_CLAIM_SIGNATURE_LEN` | 1,024 bytes | Maximum verification claim signature |
 | `MAX_ADDRESS_LEN` | 128 bytes | Maximum verification address length |
 | `MAX_CHAIN_ID_LEN` | 32 bytes | Maximum verification chain ID length |
@@ -1146,7 +1180,7 @@ Specification versions use [CalVer](https://calver.org/) (`YYYY.M.PATCH`). Each 
 
 ## Appendix B: Wire Format and Canonical Encoding
 
-The canonical wire format for all protocol messages is [Protocol Buffers v3][protobuf] as defined in [`proto/makechain.proto`](proto/makechain.proto). This file is the normative reference for field numbers, types, and encoding of core structures such as [`Message`](proto/makechain.proto#L9), [`RelayPayload`](proto/makechain.proto#L448), and [`Block`](proto/makechain.proto#L497).
+The canonical wire format for all protocol messages is [Protocol Buffers v3][protobuf] as defined in [`proto/makechain.proto`](proto/makechain.proto). This file is the normative reference for field numbers, types, and encoding of core structures such as [`Message`](proto/makechain.proto#L9), [`RelayPayload`](proto/makechain.proto#L453), and [`Block`](proto/makechain.proto#L503).
 
 ### B.1 Canonical Encoding Rules
 
@@ -1179,11 +1213,11 @@ The reference implementation uses Rust's `serde_json` library. Independent imple
 
 ### B.3 Block Hash
 
-Block hash: `H(canonical_encode(BlockHeader))` where `canonical_encode` follows the same protobuf determinism rules as [`MessageData`](proto/makechain.proto#L17) encoding; see [`BlockHeader`](proto/makechain.proto#L506).
+Block hash: `H(canonical_encode(BlockHeader))` where `canonical_encode` follows the same protobuf determinism rules as [`MessageData`](proto/makechain.proto#L17) encoding; see [`BlockHeader`](proto/makechain.proto#L512).
 
 ### B.4 Proposal Digest
 
-The proposal digest committed by `consensus_finalization` is a domain-separated BLAKE3 hash of the canonical protobuf encoding of [`RelayPayload`](proto/makechain.proto#L448):
+The proposal digest committed by `consensus_finalization` is a domain-separated BLAKE3 hash of the canonical protobuf encoding of [`RelayPayload`](proto/makechain.proto#L453):
 
 ```
 proposal_digest(R) = H(b"makechain:relay-payload:v1" || len(wire) as uint64 LE || wire)
@@ -1249,6 +1283,7 @@ The genesis state `σ₀` is the empty key-value store. No pre-registered accoun
 - `parent_hash = [0; 32]` (all zeros)
 - `state_root` = the merkle root of the empty store
 - `timestamp = 0`
+- `relay_checkpoint = { tempo_block_number = 0, tempo_block_hash = [0; 32] }`
 - No messages
 
 Validator identity is configured out-of-band via node configuration, not via genesis state.
@@ -1257,6 +1292,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.3.3 | 2026-03-30 | Commit `relay_checkpoint` in `BlockHeader` and `RelayPayload`, define tri-state replay verification and `ReplayVerificationStatus`, document replay-sensitive fail-closed surfaces, and specify the genesis zero-checkpoint sentinel. |
 | 2026.3.2 | 2026-03-30 | Add missing structural validation limits. Clarify project content-addressed identity and 2P semantics. Clarify storage quota proof active-grant definition and key ordering property. |
 | 2026.3.1 | 2026-03-26 | Add versioning policy, diagrams, references section. |
 | 2026.3.0 | 2026-03-01 | Restructure for protocol-level rigor. Add relay payload commitment, follower nodes, storage rent, quota pruning, correctness invariants, canonical encoding appendix. |
