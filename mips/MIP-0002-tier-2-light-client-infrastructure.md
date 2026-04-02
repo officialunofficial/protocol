@@ -2,7 +2,7 @@
 mip: 2
 title: Tier 2 Light Client Infrastructure
 description: Specifies the protocol changes needed to support Tier 2 light client proofs, validator commitments, and finalized historical root verification.
-author: Makechain contributors
+author: christopherwxyz <christopher@unofficial.run>
 discussions-to: https://github.com/officialunofficial/protocol/discussions
 status: Draft
 type: Standards Track

@@ -2,7 +2,7 @@
 mip: 1
 title: MIP Purpose and Process
 description: Defines the Makechain Improvement Proposal process, document structure, and lifecycle.
-author: Makechain contributors
+author: christopherwxyz <christopher@unofficial.run>
 discussions-to: https://github.com/officialunofficial/protocol/discussions
 status: Draft
 type: Meta
