@@ -9,3 +9,5 @@
 A specialized protocol built for making things.
 
 This repository contains the [specification](SPECIFICATION.md).
+
+It also contains [Makechain Improvement Proposals](mips/README.md), which are the primary mechanism for proposing protocol changes and recording their rationale.
