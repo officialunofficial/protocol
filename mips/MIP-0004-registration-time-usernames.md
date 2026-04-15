@@ -59,19 +59,17 @@ That produces a simpler design:
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119 and RFC 8174.
 
-### 1. Activation and Scope
+### 1. Scope and Authorization
 
-This MIP applies only to fresh genesis or reset networks that already include MIP-0003 semantics.
+This MIP defines the canonical username model for Makechain deployments that adopt MIP-4 semantics.
 
-Activation model:
+Scope:
 
-- this MIP is specified only for genesis-time deployment on a network whose canonical identity model is already address-native under MIP-0003
-- this MIP is not specified as an in-place hardfork for an already-running MIP-0003 network
-- this MIP does not define migration, reconciliation, or grace-period behavior for pre-existing storage-active accounts
+- this MIP preserves the MIP-0003 rule that `owner_address` is the sole canonical protocol identity
 - this MIP does not reintroduce MID or any MID-scoped identity concept
-- this MIP does not change the MIP-0003 rule that `owner_address` is the sole canonical protocol identity
+- this MIP carries username assignment entirely through `STORAGE_CLAIM`
 
-This MIP normatively amends the `STORAGE_CLAIM` authorization rules for MIP-4 deployments. The following changes take effect as part of MIP-4:
+This MIP normatively changes the `STORAGE_CLAIM` authorization rules as follows:
 
 - `STORAGE_CLAIM` becomes an authenticated user message under the ordinary delegated-key scope model
 - the envelope signer for `STORAGE_CLAIM` MUST be a registered delegated key for `MessageData.owner_address`
@@ -79,8 +77,6 @@ This MIP normatively amends the `STORAGE_CLAIM` authorization rules for MIP-4 de
 - under the existing scope ordering, `OWNER` and `SIGNING` keys satisfy that requirement, `AGENT` does not
 - finalized settlement verification remains additionally mandatory
 - duplicate `STORAGE_CLAIM` replay semantics remain anchored to settlement identity: if finalized settlement verification succeeds and `storage_claim_marker(claim_id)` already exists, the message is a valid duplicate claim and execution MUST be an idempotent no-op regardless of current delegated-key state
-
-This scope avoids any need to retrofit usernames onto already-active accounts that were created under a username-less MIP-0003 deployment.
 
 ### 2. Username Model
 
@@ -135,9 +131,7 @@ All consensus-visible username comparisons and persisted username state MUST use
 
 #### 4.1 `StorageClaimBody`
 
-`StorageClaimBody` is extended with a username field.
-
-The canonical protobuf shape is:
+The canonical protobuf schema is:
 
 ```proto
 message StorageClaimBody {
@@ -199,11 +193,9 @@ Required semantics:
 - the username index MUST be merkleized state
 - global username uniqueness is enforced by this index
 
-#### 5.2 Account State Extension
+#### 5.2 Account State
 
-`AccountState` is extended with the account's active username.
-
-The canonical logical schema delta relative to MIP-0003 is:
+The canonical logical schema is:
 
 ```text
 AccountState {
@@ -418,29 +410,28 @@ Required note:
 
 The public account surface MUST expose the canonical username separately from mutable profile metadata.
 
-The canonical `GetAccountResponse` delta is:
+The canonical public account schema is:
 
 ```proto
 message GetAccountResponse {
-  reserved 1;               // was mid
-  string display_name = 2;
-  string avatar = 3;
-  string bio = 4;
-  string website = 5;
-  repeated KeyEntry keys = 6;
-  uint32 storage_units = 7;
-  uint32 project_count = 8;
-  repeated VerificationEntry verifications = 9;
-  bytes owner_address = 10;
-  uint32 link_count = 11;
-  uint32 reaction_count = 12;
-  uint64 custody_nonce = 13;
-  uint32 max_projects = 14;
-  uint32 max_links = 15;
-  uint32 max_verifications = 16;
-  uint32 max_reactions = 17;
-  uint32 max_collaborators_per_project = 18;
-  string username = 19;
+  string display_name = 1;
+  string avatar = 2;
+  string bio = 3;
+  string website = 4;
+  repeated KeyEntry keys = 5;
+  uint32 storage_units = 6;
+  uint32 project_count = 7;
+  repeated VerificationEntry verifications = 8;
+  bytes owner_address = 9;
+  uint32 link_count = 10;
+  uint32 reaction_count = 11;
+  uint64 custody_nonce = 12;
+  uint32 max_projects = 13;
+  uint32 max_links = 14;
+  uint32 max_verifications = 15;
+  uint32 max_reactions = 16;
+  uint32 max_collaborators_per_project = 17;
+  string username = 18;
 }
 ```
 
@@ -484,22 +475,7 @@ Why use a dedicated state index instead of `ACCOUNT_DATA(DISPLAY_NAME)`:
 - usernames need release on storage expiry
 - `ACCOUNT_DATA` is LWW metadata and does not provide those semantics
 
-### 10. Backwards Compatibility
-
-This MIP is additive on top of MIP-0003 for new genesis deployments, but not neutral with respect to wire and state schema.
-
-Effects:
-
-- `StorageClaimBody` gains a new field at canonical field number `6`
-- `AccountState` gains a new field `username`
-- prefix `0x08`, previously unused in MIP-0003, becomes consensus-visible state
-- proof allowlists expand to include username index keys
-- `GetAccountResponse` gains a new field `username = 19`
-- `STORAGE_CLAIM` authorization semantics change from transport-only settlement-backed to delegated-key-authenticated plus settlement-verified on first successful application
-
-This is acceptable because the MIP is specified only for fresh MIP-0003 genesis deployments and not as an in-place upgrade.
-
-### 11. Rejected Alternatives
+### 10. Rejected Alternatives
 
 #### Model username as `ACCOUNT_DATA`
 
@@ -521,7 +497,7 @@ Rejected because once `STORAGE_CLAIM` is delegated-key-authorized by `owner_addr
 
 Rejected because the proposal explicitly defines usernames as paid-storage-backed namespace reservations.
 
-### 12. Security Considerations
+### 11. Security Considerations
 
 This proposal introduces a globally contended namespace and therefore adds several security-sensitive edges.
 
@@ -560,27 +536,25 @@ Denial of service:
 - username conflicts may force execution-time sweep of a conflicting indexed owner
 - implementations should keep this bounded by reusing existing storage-sweep code paths rather than performing unbounded scans
 
-### 13. Acceptance Criteria
+### 12. Acceptance Criteria
 
 This MIP is considered specified when all of the following are true:
 
-- `STORAGE_CLAIM` carries a canonical username field at wire field number `6` for first paid storage activation
+- `StorageClaimBody` defines `username = 6` in the canonical protobuf schema
 - `STORAGE_CLAIM` is delegated-key-authorized by `owner_address` under MIP-4 with required scope `SIGNING` for first successful application
 - duplicate claims with an existing claim marker remain full-evidence-verified idempotent no-ops regardless of current delegated-key state
 - first paid storage activation requires a valid username
 - subsequent storage claims while effective active storage remains nonzero cannot set or change username
 - a global username index is defined in consensus state at prefix `0x08`
 - `AccountState.username` is part of the canonical state model and serialized as `string | null`
-- `GetAccountResponse.username` is exposed at field number `19`
+- `GetAccountResponse.username` is exposed at field number `18`
 - username release is defined through required storage sweep when effective active storage reaches zero
 - stale conflicting username reservations are deterministically reclaimed after sweeping the indexed owner to zero effective active storage
 - same-block username claim interactions, including earlier conflicting-owner sweeps affecting later claims, are handled by normal serial execution and dropping of later invalid messages
 - username index keys are available on the public operation and exclusion proof surfaces
 - proofs over username index keys are explicitly defined as proofs of persisted state only
 - account responses expose canonical username separately from mutable display metadata using effective read-time semantics
-- the MIP is clearly scoped to fresh MIP-0003 genesis deployment rather than in-place hardfork activation
 
-### 14. Copyright
+### 13. Copyright
 
 Copyright and related rights waived via CC0.
-
