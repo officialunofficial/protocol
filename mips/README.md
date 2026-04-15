@@ -8,5 +8,6 @@ Current proposals:
 
 - [MIP-0001](./MIP-0001-mip-process.md) - MIP Purpose and Process
 - [MIP-0002](./MIP-0002-tier-2-light-client-infrastructure.md) - Tier 2 Light Client Infrastructure
+- [MIP-0004](./MIP-0004-registration-time-usernames.md) - Registration-Time Usernames for Address-Native Accounts
 
 The MIP process is defined by [MIP-0001](./MIP-0001-mip-process.md).
