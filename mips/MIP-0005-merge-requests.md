@@ -19,7 +19,7 @@ It has six parts:
 1. Add `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` as a new tombstone-backed 2P set family.
 2. Define dual authorization for `MERGE_REQUEST_REMOVE`: the original requester MAY withdraw without project membership, and a project member with `WRITE+` permission MAY close the request.
 3. Preserve fork ancestry in a retained canonical lineage index so merge-request lineage validation does not depend on prunable project rows.
-4. Store merge request state under target-project-namespaced keys with a requester reverse index, following existing V2 2P-set patterns (tombstones, prune markers, compound proofs).
+4. Store merge request state under target-project-namespaced keys with a requester reverse index, following existing tombstone-backed 2P-set patterns (tombstones, prune markers, compound proofs).
 5. Extend `ProjectState` with a `merge_request_count` counter and apply project-owner-funded storage limits.
 6. Expose public merge request queries via gRPC and the REST gateway.
 
@@ -43,29 +43,11 @@ This gap makes decentralized contribution workflows depend on out-of-band coordi
 
 The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this document are to be interpreted as described in RFC 2119 and RFC 8174.
 
-### 1. Activation and Scope
+### 1. Scope and Integration
 
-This MIP is an additive extension to the current protocol. It defines new message types, state keys, and validation rules that do not modify any existing message semantics.
+This MIP specifies canonical merge-request behavior for a clean-slate network reset. It assumes no preserved pre-MIP chain state, no activation boundary, and no compatibility obligation with older serialized state or older protobuf field assignments.
 
-This MIP requires activation at named hardfork `MergeRequests` beyond the currently active `Genesis` baseline.
-
-`MergeRequests` is a same-wire semantic hardfork. `BlockHeader.version` and `ExecutionPayload.version` remain `5` before and after activation.
-
-Implementations that adopt this MIP MUST:
-
-1. Add `MergeRequests` as a new hardfork enum variant in activation order.
-2. Add compiled activation schedules for each network.
-3. Derive the active hardfork from `(network, block_timestamp)` for execution, replay, sync, and persisted-block verification.
-4. Use node wall clock only as a best-effort admission precheck for submit and dry-run.
-5. Gate all new validation, execution, replay, and API behavior on that hardfork.
-
-Required activation semantics:
-
-1. Before activation, `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` MUST be rejected by submit, dry-run, execution, and replay paths.
-2. At the first block where `MergeRequests` is active, implementations MUST backfill retained `0x1A` lineage rows for every retained fork project whose stored `ProjectState.fork_source != None`, before processing normal post-activation messages for that block.
-3. That activation backfill MUST write `[0x1A | project_id] = parent_project_id` using the retained pre-activation `ProjectState.fork_source` value, and MUST NOT write `0x1A` rows for non-fork projects.
-4. After activation, these message types MUST be accepted per the rules in this specification.
-5. Historical blocks produced before activation MUST continue to validate under pre-activation rules.
+It defines new message types, state keys, and validation rules for merge requests without changing project creation, fork authorization, identity derivation, or ref/commit update semantics outside this new primitive.
 
 ### 2. Message Types
 
@@ -84,8 +66,8 @@ MESSAGE_TYPE_MERGE_REQUEST_REMOVE = 85;
 Two new oneof variants are added to the `body` field of `MessageData`:
 
 ```protobuf
-MergeRequestAddBody    merge_request_add    = 98;
-MergeRequestRemoveBody merge_request_remove = 99;
+MergeRequestAddBody    merge_request_add    = 96;
+MergeRequestRemoveBody merge_request_remove = 97;
 ```
 
 #### 2.3 MergeRequestAddBody
@@ -181,8 +163,8 @@ Required semantics:
 9. When merge-request state for a target project is deleted as part of project removal or subtree cleanup, implementations MUST delete the project's merge-request forward rows, requester reverse rows, tombstones, and prune markers for this family.
 10. Project removal, project pruning, and subtree cleanup MUST NOT delete retained `0x1A` lineage rows.
 11. Prefixes `0x1A`, `0x1B`, and `0x1C` MUST be added explicitly to the schema-prefix, queryable-prefix, and merkleized-prefix sets in the implementation.
-12. Implementations that define canonical first/last prefix bounds for schema, queryable, or merkleized ranges MUST extend those bounds consistently for this hardfork so that prefixes `0x1A`, `0x1B`, and `0x1C` are included in every intended range-based check or iteration, not only in explicit allowlists.
-13. Public proof allowlists MUST be explicitly updated for merge-request proofs on the public proof surface; retained `0x1A` lineage rows are internal canonical state and are not part of the public proof surface in v1.
+12. Implementations that define canonical first/last prefix bounds for schema, queryable, or merkleized ranges MUST extend those bounds consistently so that prefixes `0x1A`, `0x1B`, and `0x1C` are included in every intended range-based check or iteration, not only in explicit allowlists.
+13. Public proof allowlists MUST be explicitly updated for merge-request proofs on the public proof surface; retained `0x1A` lineage rows are internal canonical state and are not part of the public proof surface.
 14. Merge request active keys MUST be added to the 2P-set compound-proof allowlist if compound proofs are supported for this family.
 
 #### 3.3 ProjectState extension
@@ -209,8 +191,7 @@ Required semantics:
 1. `merge_request_count` MUST equal the number of active merge request entries under `[0x1B | project_id]`.
 2. Handlers MUST maintain counter accuracy across add, remove, and prune operations.
 3. This field is merkleized as part of `ProjectState`.
-4. `merge_request_count` MUST be annotated with `#[serde(default)]` with default value `0` so that `ProjectState` values stored before this MIP's activation (which lack this field) deserialize correctly. When writing `ProjectState`, the field MUST be present (not conditionally omitted), per Appendix B.2 of the specification.
-5. Adding this field changes the serialized representation of every project touched after activation, even if the project has zero merge requests. Projects that are not touched by any post-activation message retain their pre-activation serialization and are not rewritten until a project-affecting message modifies them.
+4. When writing `ProjectState`, `merge_request_count` MUST be present (not conditionally omitted), per Appendix B.2 of the specification.
 
 #### 3.4 No requester counter
 
@@ -459,7 +440,7 @@ Required semantics:
 
 ### 8. Proof Surface
 
-Public proof exposure for merge requests is enabled in v1. Implementations MUST update the explicit proof allowlists; it is not sufficient to rely on prefix-range expansion alone.
+Public proof exposure for merge requests is enabled in this specification. Implementations MUST update the explicit proof allowlists; it is not sufficient to rely on prefix-range expansion alone.
 
 Required public-proof semantics:
 
@@ -467,11 +448,11 @@ Required public-proof semantics:
 2. `GetExclusionProof([0x1B | project_id | request_id])` proves that a merge request does not exist at the queried root.
 3. `GetCompoundProof([0x1B | project_id | request_id])` proves the full 2P-set state for that identity: active row, tombstone row, and prune marker row against a single root.
 4. Merge-request active keys MUST be added to the public compound-proof allowlist.
-5. Retained fork-lineage rows under prefix `0x1A` are not part of the public proof surface in v1.
+5. Retained fork-lineage rows under prefix `0x1A` are not part of the public proof surface.
 
 ### 9. API Surface
 
-Merge request queries are public, including for projects whose `visibility` is `PRIVATE`. This follows the current V2 read model, where `PRIVATE` does not generally gate canonical state reads and is presently enforced only on specific mutation flows such as `FORK`.
+Merge request queries are public, including for projects whose `visibility` is `PRIVATE`. This follows Makechain's read model, where `PRIVATE` does not generally gate canonical state reads and is presently enforced only on specific mutation flows such as `FORK`.
 
 #### 9.1 gRPC queries
 
@@ -557,7 +538,7 @@ Add routes:
 
 #### 9.5 Generic message surfaces
 
-After activation, all generic message surfaces keyed by `MessageType` MUST recognize `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE`, including:
+All generic message surfaces keyed by `MessageType` MUST recognize `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE`, including:
 
 1. `ListMessages`
 2. `GetProjectActivity`
@@ -601,7 +582,7 @@ A merge request identity is `request_id = Message.hash`. Re-opening a closed mer
 
 ### 12. Rationale
 
-This proposal adds a minimal protocol-level primitive for cross-project contribution proposals while following current V2 patterns.
+This proposal adds a minimal protocol-level primitive for cross-project contribution proposals while following existing tombstone-backed and project-scoped Makechain patterns.
 
 Why a tombstone-backed 2P set:
 
@@ -613,7 +594,7 @@ Why content-addressed identity:
 
 1. Merge requests have no natural stable tuple that should limit a requester to one open request per project.
 2. A requester should be able to open multiple concurrent requests against the same project.
-3. Content-addressed identity matches current Makechain patterns for content-addressed project-like objects.
+3. Content-addressed identity matches Makechain's existing content-addressed object patterns.
 
 Why restrict the source project to the target's fork lineage:
 
@@ -642,51 +623,19 @@ Why no `closed_by` in canonical state:
 
 Why public queries even for private projects:
 
-1. Current V2 semantics do not generally gate canonical reads by visibility.
-2. Visibility currently affects mutation authorization, especially `FORK`, rather than public query surfaces.
+1. Makechain semantics do not generally gate canonical reads by visibility.
+2. Visibility affects mutation authorization, especially `FORK`, rather than public query surfaces.
 3. Public discoverability is part of the value of a protocol-level merge-request primitive.
 
 Why project-owner-funded quota:
 
 1. Merge requests consume the target project's namespace and indexing surface.
-2. This matches current per-project quota reasoning better than charging the requester account.
+2. This matches existing per-project quota reasoning better than charging the requester account.
 3. The owner or maintainers can close stale requests and recover capacity through normal pruning behavior.
 
-### 13. Backwards Compatibility
+### 13. Reset Assumption
 
-This MIP is additive. It introduces:
-
-1. Two new `MessageType` enum values (`84`, `85`).
-2. Two new `MessageData.body` oneof variants (`98`, `99`).
-3. Three new state key prefixes (`0x1A`, `0x1B`, `0x1C`).
-4. One retained fork-lineage state family written by post-activation `FORK` and backfilled for retained pre-activation forks at activation.
-5. One new `ProjectState` field (`merge_request_count`).
-6. New gRPC queries and REST endpoints.
-7. One new storage-limit row.
-
-These additions do not modify existing project creation, fork authorization, or ref/commit semantics, but they do add retained fork-lineage state written by post-activation `FORK`, backfilled for retained pre-activation forks at activation, and used by `MERGE_REQUEST_ADD` validation.
-
-Pre-activation behavior:
-
-1. `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` MUST be rejected.
-2. Existing blocks and state remain valid.
-
-Post-activation behavior:
-
-1. These message types are accepted per this MIP.
-2. Implementations MUST add hardfork gating across submit, dry-run, execution, replay, and sync.
-
-#### 13.1 State Migration
-
-Adding `merge_request_count` to `ProjectState` changes the serialized representation of every project touched after activation. Existing `ProjectState` values stored in QMDB before activation lack this field. Implementations MUST ensure backward-compatible deserialization by using `#[serde(default)]` with default `0` on the new field.
-
-The reference implementation uses `#[serde(deny_unknown_fields)]` on all state value structs. The `#[serde(default)]` attribute on `merge_request_count` is compatible with `deny_unknown_fields` because serde applies `default` for missing fields before the `deny_unknown_fields` check. Therefore:
-- Pre-activation values that lack `merge_request_count` deserialize with the field set to `0`.
-- Post-activation values that include the field deserialize normally with the stored value.
-
-At `MergeRequests` activation, implementations MUST also backfill retained `0x1A` lineage rows for every fork project that is still retained in canonical state and whose stored `ProjectState.fork_source != None`. This backfill is a consensus-defined activation transition, not an implementation-local repair step.
-
-Projects that are not touched by any post-activation message retain their pre-activation `ProjectState` serialization and are not rewritten until a project-affecting message modifies them, but retained pre-activation fork projects do receive the `0x1A` lineage backfill at activation.
+This MIP is specified for a clean-slate network reset. Implementations do not need migration logic, hardfork gating, activation backfills, or backward-compatible deserialization for pre-MIP 5 project rows.
 
 ### 14. Rejected Alternatives
 
@@ -702,9 +651,9 @@ Rejected because it defeats the purpose of permissionless contribution proposals
 
 Rejected because it would limit each requester to one open merge request per project.
 
-#### Adding `merged`, `rejected`, or `closed_by` to canonical state in v1
+#### Adding `merged`, `rejected`, or `closed_by` to canonical state in the initial version
 
-Rejected because finalized history already provides attribution, while extra canonical state would introduce merge-request-specific complexity that current V2 patterns do not need.
+Rejected because finalized history already provides attribution, while extra canonical state would introduce merge-request-specific complexity that existing Makechain patterns do not need.
 
 #### Charging requester storage quota instead of target-project quota
 
@@ -752,7 +701,7 @@ Content-addressed identity:
 
 This MIP is considered specified when all of the following are true:
 
-1. `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` carry canonical wire definitions at enum values `84` and `85` with oneof field numbers `98` and `99`.
+1. `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` carry canonical wire definitions at enum values `84` and `85` with oneof field numbers `96` and `97`.
 2. The proposal uses address-native semantics throughout and does not depend on MID.
 3. `MergeRequestAddBody` validates `project_id` (32 bytes), `source_project_id` (32 bytes, not equal to `project_id`), `source_ref` (1-254 bytes, no null bytes), `source_commit_hash` (32 bytes), `target_ref` (1-254 bytes, no null bytes), and `title` (1-200 UTF-8 bytes).
 4. `MergeRequestRemoveBody` validates `project_id` (32 bytes) and `request_id` (32 bytes).
@@ -760,20 +709,17 @@ This MIP is considered specified when all of the following are true:
 6. `MERGE_REQUEST_REMOVE` has dual authorization: requester withdrawal or target-project owner/collaborator with `WRITE+` permission, while allowing archived targets.
 7. Merge request identity is content-addressed as `request_id = Message.hash`.
 8. `MERGE_REQUEST_ADD` requires `source_project_id` to be in the target project's retained fork lineage within `MAX_FORK_LINEAGE_DEPTH = 256` hops, and validation fails if traversal terminates early, encounters a cycle, encounters a missing retained intermediate ancestor, or would exceed that bound.
-9. Immediate fork ancestry is stored under retained prefix `0x1A`, written by post-activation `FORK`, backfilled for retained pre-activation forks at activation, and preserved across project removal and project-subtree pruning.
+9. Immediate fork ancestry is stored under retained prefix `0x1A`, written by `FORK`, and preserved across project removal and project-subtree pruning.
 10. Merge request state is stored at prefix `0x1B` with reverse index at prefix `0x1C` keyed by requester owner address.
-11. `ProjectState.merge_request_count` is incremented on add and decremented on remove or active-entry prune.
+11. `ProjectState.merge_request_count` is incremented on add and decremented on remove or active-entry prune, and is serialized as part of canonical `ProjectState` values.
 12. `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` are classified as Phase 2 project messages grouped by target `project_id`.
 13. Storage-limit enforcement follows `max_merge_requests_per_project(units) = 20 + units × 20` with active-plus-tombstone counting, prune-marker semantics, matching reverse-row deletion on active prune, and pending-add reservation so successful adds cannot leave the family above limit.
 14. Both message types are listed as storage-sensitive.
-15. Public operation, exclusion, and compound proofs support merge-request active keys, while retained fork-lineage rows under `0x1A` remain off the public proof surface in v1.
+15. Public operation, exclusion, and compound proofs support merge-request active keys, while retained fork-lineage rows under `0x1A` remain off the public proof surface.
 16. gRPC queries have canonical protobuf request/response definitions for `GetMergeRequest`, `ListMergeRequests`, and `ListMergeRequestsByRequester`, including pagination cursors and the optional requester owner-address filter on `ListMergeRequests`.
-17. Generic message surfaces, including `ListMessages`, `GetProjectActivity`, `GetAccountActivity`, `SubscribeMessages`, and mempool type breakdowns, recognize `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` after activation.
+17. Generic message surfaces, including `ListMessages`, `GetProjectActivity`, `GetAccountActivity`, `SubscribeMessages`, and mempool type breakdowns, recognize `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE`.
 18. gRPC queries and REST gateway endpoints expose public merge-request listing and retrieval, returning only active entries. Removed or pruned merge requests return `NOT_FOUND` from `GetMergeRequest`.
-19. Hardfork activation correctly rejects these message types before activation and accepts them after activation, with `MergeRequests` retaining wire version `5`.
-20. At `MergeRequests` activation, retained pre-activation fork projects with `ProjectState.fork_source != None` receive deterministic `0x1A` lineage rows before normal post-activation message processing.
-21. `ProjectState.merge_request_count` uses `#[serde(default)]` with default `0` for backward-compatible deserialization of pre-activation stored values.
-22. `MERGE_REQUEST_REMOVE` does not check source project status — closure proceeds even if the source project has been removed or archived since the merge request was opened.
+19. `MERGE_REQUEST_REMOVE` does not check source project status — closure proceeds even if the source project has been removed or archived since the merge request was opened.
 
 ### 17. Implementation Notes
 
@@ -787,31 +733,29 @@ Modified files:
 
 | File | Changes |
 |------|---------|
-| `proto/makechain.proto` | MessageType enum values, body messages, oneof fields, and canonical merge-request query request/response types |
-| `crates/makechain-proto/src/hardfork.rs` | New hardfork enum variant, activation schedule, and same-wire version mapping |
+| `proto/makechain.proto` | MessageType enum values, body messages, fresh-start oneof field numbers, and canonical merge-request query request/response types |
 | `crates/makechain-state/src/keys.rs` | Prefixes `0x1A`, `0x1B`, and `0x1C`, key constructors, explicit queryable/merkleized/proof allowlist updates, and canonical prefix-range bound updates |
-| `crates/makechain-state/src/values.rs` | `MergeRequestState` struct, retained fork-lineage value type for `0x1A`, and `ProjectState.merge_request_count` field with `#[serde(default)]` default `0` |
+| `crates/makechain-state/src/values.rs` | `MergeRequestState` struct, retained fork-lineage value type for `0x1A`, and `ProjectState.merge_request_count` field |
 | `crates/makechain-state/src/handlers/project.rs` | `FORK` writes retained `0x1A` fork-parent lineage rows |
-| `crates/makechain-state/src/validation.rs` | Structural validation and hardfork gating |
+| `crates/makechain-state/src/validation.rs` | Structural validation |
 | `crates/makechain-state/src/authorization.rs` | Merge-request auth helpers, including archived-project close path |
 | `crates/makechain-state/src/storage_policy.rs` | `max_merge_requests_per_project()`, merge-request quota enforcement with pending-add reservation, merge-request prune-marker cleanup, target-project subtree cleanup of reverse rows, and preservation of retained `0x1A` lineage rows during project pruning |
 | `crates/makechain-state/src/transition.rs` | Message dispatch and execution |
 | `crates/makechain-state/src/handlers/mod.rs` | `pub mod merge_requests` |
 | `crates/makechain-api/src/query.rs` | `get_merge_request()`, `list_merge_requests()`, `list_merge_requests_by_requester()`, and generic activity/list-message integration |
-| `crates/makechain-api/src/service.rs` | gRPC handler methods, admission gating, and generic message-stream/filter integration |
+| `crates/makechain-api/src/service.rs` | gRPC handler methods and generic message-stream/filter integration |
 | `apps/gateway/src/routes/` | `merge-requests.ts` route file and generic message-surface type recognition |
 
 ### 18. Resolved Decisions
 
 This proposal's remaining design choices are resolved as follows:
 
-1. `target_ref` remains required in v1.
+1. `target_ref` remains required in the initial version.
 2. Projects do not gain an inbound-merge-request disable flag in MIP 5.
-3. Public proof exposure for merge-request active keys and compound proofs is enabled in v1.
-4. MIP 5 activates behind named hardfork `MergeRequests`.
-5. `MergeRequests` is a same-wire semantic hardfork; `BlockHeader.version` and `ExecutionPayload.version` remain `5`.
+3. Public proof exposure for merge-request active keys and compound proofs is enabled in the initial version.
+4. MIP 5 is specified as baseline protocol behavior for a clean-slate reset, with no activation migration or hardfork gating.
+5. `MergeRequestAddBody` and `MergeRequestRemoveBody` use fresh-start oneof field numbers `96` and `97`.
 
 ### 19. Copyright
 
 Copyright and related rights waived via CC0.
-
