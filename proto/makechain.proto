@@ -805,6 +805,8 @@ message GetAccountResponse {
   uint32 max_verifications = 16;
   uint32 max_reactions = 17;
   uint32 max_collaborators_per_project = 18;
+  uint32 max_merge_requests_per_requester = 19;
+  uint32 max_merge_requests_per_project = 20;
 }
 
 message KeyEntry {
@@ -1174,11 +1176,13 @@ message SyncFetchRequest {
   uint64 op_count = 1;        // Total operation count at target (from GetSyncTarget.range_end)
   uint64 start_location = 2;  // Start location to fetch from
   uint64 max_operations = 3;  // Max operations per batch
+  bool include_pinned_nodes = 4;
 }
 
 message SyncFetchResponse {
   bytes proof = 1;             // Encoded MMR Proof<Blake3Digest> (commonware-codec)
   repeated bytes operations = 2; // Each operation encoded via commonware-codec
+  repeated bytes pinned_nodes = 3; // Blake3 digests required to verify the lower boundary when requested
 }
 
 // --- Block Sync ---
@@ -1292,6 +1296,8 @@ message GetStorageQuotaProofResponse {
   bytes owner_address = 13;          // 20 bytes
   bytes upper_bound_key = 14;
   bytes upper_bound_proof = 15;
+  uint32 max_merge_requests_per_project = 16;
+  uint32 max_merge_requests_per_requester = 17;
 }
 
 message GetCompoundProofRequest {

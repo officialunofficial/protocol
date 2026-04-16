@@ -463,7 +463,7 @@ The requester can free Layer 1 capacity through the withdrawal path in `MERGE_RE
 Required semantics:
 
 1. **Layer 1 counts only active entries** (via the reverse index). Tombstones are not visible through the reverse index because reverse rows are deleted on close/prune, so tombstones do not count against the requester's quota.
-2. **Layer 2 counts active entries + tombstones** (via forward-key prefix scan). This bounds the total namespace footprint under the target project, including residual tombstone state.
+2. **Layer 2 counts active entries + tombstones** (via the target project's active forward prefix `[0x1B | project_id]` plus tombstones under `[0x03 | 0x1B | project_id | ...]`). This bounds the total namespace footprint under the target project, including residual tombstone state.
 3. **Layer 1 is enforced first.** If the requester is over their global limit, the add is rejected before any project-local pruning occurs.
 4. **Layer 2 auto-pruning is project-local.** It only deletes entries within the target project's namespace, preserving project isolation.
 5. `MERGE_REQUEST_ADD` MUST invoke both layers before writing the new active row.
