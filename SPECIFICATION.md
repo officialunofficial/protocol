@@ -1,14 +1,14 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="../assets/logo-shapes-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="../assets/logo-shapes-light.svg">
-  <img alt="Makechain" src="../assets/logo-shapes-dark.svg" width="140">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-shapes-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/logo-shapes-light.svg">
+  <img alt="Makechain" src="assets/logo-shapes-dark.svg" width="140">
 </picture>
 
 # Makechain
 
 A specialized protocol built for making things.
 
-**Version:** 2026.4.1
+**Version:** 2026.5.0
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every committed message is verifiable from canonical state and, where applicable, finalized message-local external evidence.
 
@@ -116,7 +116,7 @@ Message {
 }
 ```
 
-**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](proto/makechain.proto#L17). For `2026.4.1`, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
+**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](proto/makechain.proto#L17). In this version, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
 
 The `data_bytes` field (field 5 on [`Message`](proto/makechain.proto#L9)) caches `canonical_encode(data)` — the same bytes that were hashed. Verifiers re-encode `data` independently and reject the message if `data_bytes` does not match, then check the hash against the re-encoded bytes. `data_bytes` is never used as a hash input directly; it exists so intermediaries can forward the original encoding without re-serializing.
 
@@ -183,7 +183,7 @@ Every message type follows one of two paradigms:
 | Sub-type | Conflict resolution | Types |
 |----------|-------------------|-------|
 | CAS-ordered | Compare-and-swap sequencing | `REF_UPDATE` / `REF_DELETE` |
-| Set | Tombstone-backed remove-wins | All other Add/Remove pairs |
+| Set | Tombstone-backed remove-wins | All other Add/Remove pairs, including `MERGE_REQUEST_ADD` / `MERGE_REQUEST_REMOVE` |
 
 ### 2.4 Complete Type Reference
 
@@ -209,6 +209,8 @@ Every message type follows one of two paradigms:
 | `LINK_REMOVE` | 81 | 2P Set | SIGNING | [`LinkRemoveBody`](proto/makechain.proto#L354) |
 | `REACTION_ADD` | 82 | 2P Set | SIGNING | [`ReactionAddBody`](proto/makechain.proto#L372) |
 | `REACTION_REMOVE` | 83 | 2P Set | SIGNING | [`ReactionRemoveBody`](proto/makechain.proto#L378) |
+| `MERGE_REQUEST_ADD` | 84 | 2P Set | SIGNING | [`MergeRequestAddBody`](proto/makechain.proto) |
+| `MERGE_REQUEST_REMOVE` | 85 | 2P Set | SIGNING | [`MergeRequestRemoveBody`](proto/makechain.proto) |
 
 † `PROJECT_CREATE` is paired with `PROJECT_REMOVE` as a 2P Set, but does not follow the generic `apply_2p_add` re-add path because `project_id` is content-addressed (Section 2.5). See Section 4.2 for the specific semantics.
 
@@ -216,6 +218,7 @@ Every message type follows one of two paradigms:
 
 - **`project_id`** = `Message.hash` = `H(canonical_encode(MessageData))` — the BLAKE3 hash of the `MessageData` contents of the `PROJECT_CREATE` message. This is the `hash` field in the message envelope, NOT a hash of the full envelope (which also includes `signer`, `signature`, and `data_bytes`). Two projects with the same name produce different IDs because the hash includes `owner_address`, `timestamp`, and the rest of the canonical payload.
 - **Forked project ID** = `Message.hash` of the `FORK` message — same principle.
+- **`request_id`** = `Message.hash` of the `MERGE_REQUEST_ADD` message — the merge request identity is content-addressed, so re-opening a closed request always yields a fresh ID.
 - **`commit_hash`** = Client-computed BLAKE3 hash of the full commit object. Declared by the submitter, not recomputed by validators.
 
 ---
@@ -282,7 +285,7 @@ The only Tempo-backed storage ingress is `STORAGE_CLAIM`, a user-submitted messa
 
 ### 4.1 Global State
 
-The global state `σ` is a key-value store mapping byte strings to byte strings. All state objects (accounts, projects, keys, refs, commits, collaborators, verifications, links, reactions, tombstones, counters, storage grants) are serialized values under prefix-namespaced keys (see Section 6.1).
+The global state `σ` is a key-value store mapping byte strings to byte strings. All state objects (accounts, projects, retained fork-lineage rows, merge requests, keys, refs, commits, collaborators, verifications, links, reactions, tombstones, counters, storage grants) are serialized values under prefix-namespaced keys (see Section 6.1).
 
 ### 4.2 Block Execution
 
@@ -339,7 +342,7 @@ apply_block(σ, B, R) → σ':
 
 `PROJECT_CREATE`, `PROJECT_REMOVE`, and `FORK` are classified as account messages because they modify `project_count` on the account.
 
-**Project messages** (Phase 2, serial per-project group): `PROJECT_METADATA`, `PROJECT_ARCHIVE`, `REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`. Grouped by `project_id`, groups iterated in byte-lexicographic order of the 32-byte `project_id`. Within each group, messages are processed in the order specified by the proposer and carried authoritatively in `ExecutionPayload.project_messages`; the block's `ShardChunk.txns[*].user_messages` copy MUST match.
+**Project messages** (Phase 2, serial per-project group): `PROJECT_METADATA`, `PROJECT_ARCHIVE`, `REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`. Grouped by target `project_id`, groups iterated in byte-lexicographic order of the 32-byte `project_id`. Within each group, messages are processed in the order specified by the proposer and carried authoritatively in `ExecutionPayload.project_messages`; the block's `ShardChunk.txns[*].user_messages` copy MUST match.
 
 Dropped messages are excluded from the committed block but do not halt execution.
 
@@ -353,7 +356,7 @@ Dropped messages are excluded from the committed block but do not halt execution
 |---|---|---|
 | `PROJECT_CREATE` | 2P add | `project(id)`, `project_name(owner_address, name)`, `account(owner_address)` [project_count++] |
 | `PROJECT_REMOVE` | 2P remove | `project(id)` [status], `tombstone(project(id))`, `account(owner_address)` [project_count--] |
-| `FORK` | Singleton | `project(id)` [with `fork_source`], `project_name(owner_address, name)`, `account(owner_address)` [project_count++] |
+| `FORK` | Singleton | `project(id)` [with `fork_source`], `fork_parent(id)`, `project_name(owner_address, name)`, `account(owner_address)` [project_count++] |
 | `PROJECT_METADATA` | LWW | `project_meta(id, field)`, optionally `project_name(owner_address, *)` for name changes |
 | `ACCOUNT_DATA` | LWW | `account_meta(owner_address, field)` |
 | `COMMIT_BUNDLE` | Append | `commit(project_id, hash)` per commit; triggers `prune_commits` if over limit |
@@ -371,6 +374,8 @@ Dropped messages are excluded from the committed block but do not halt execution
 | `LINK_REMOVE` | 2P remove | deletes `link(...)`, `link_reverse(...)`, `tombstone(link(...))`, `counter(owner_address, 0x01)` |
 | `REACTION_ADD` | 2P add | `reaction(owner_address, type, proj, hash)`, `reaction_reverse(type, proj, hash, owner_address)`, `counter(owner_address, 0x02)` |
 | `REACTION_REMOVE` | 2P remove | deletes `reaction(...)`, `reaction_reverse(...)`, `tombstone(reaction(...))`, `counter(owner_address, 0x02)` |
+| `MERGE_REQUEST_ADD` | 2P add | `merge_request(project_id, request_id)`, `merge_request_reverse(owner_address, project_id, request_id)`, `project(project_id)` [merge_request_count++] |
+| `MERGE_REQUEST_REMOVE` | 2P remove | deletes `merge_request(...)`, deletes `merge_request_reverse(...)`, `tombstone(merge_request(...))`, `project(project_id)` [merge_request_count--] |
 
 Key names reference Section 6.1 prefixes. 2P add/remove handlers also interact with prune markers (`0x15`) during quota pruning (Section 11.4). `MessageType::None` returns `Err`.
 
@@ -397,7 +402,7 @@ timestamp_valid(M, block_timestamp) → bool:
 
 All arithmetic MUST use saturating subtraction (clamping to 0 on underflow) since timestamps are unsigned integers.
 
-Storage-sensitive types (types that create or remove quota-affecting state): `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `STORAGE_CLAIM`.
+Storage-sensitive types (types that create or remove quota-affecting state): `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `STORAGE_CLAIM`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`.
 
 ### 4.4 Conflict Resolution
 
@@ -689,6 +694,67 @@ P256 and WebAuthn therefore share the same 20-byte address space for the same un
 
 The [`Visibility`](proto/makechain.proto#L159) enum (`PUBLIC` / `PRIVATE`) is defined on [`ProjectCreateBody`](proto/makechain.proto#L147), [`ForkBody`](proto/makechain.proto#L168), and [`ProjectMetadataBody`](proto/makechain.proto#L181). In the current protocol version, visibility does not gate general read access to canonical project state, but it does constrain `FORK`: a private source project MAY be forked only by its owner or by a collaborator with at least `READ` permission. `PRIVATE` visibility is otherwise reserved for future access control extensions. Implementations MUST store and return the visibility value and MUST enforce the `FORK` access rule above.
 
+### 5.9 Merge Request Authorization
+
+Both merge-request message types require a registered delegated key with `SIGNING` scope or stronger.
+
+#### 5.9.1 `MERGE_REQUEST_ADD`
+
+`MERGE_REQUEST_ADD` authorization is:
+
+```
+authorize_merge_request_add(σ, data, body, signer) -> Ok | Err:
+  check_key_scope(σ, data.owner_address, signer, SIGNING)
+
+  let target = get_project_active(σ, body.project_id)
+  if target.visibility == PRIVATE:
+    check_project_access(σ, data.owner_address, body.project_id, READ)
+
+  let source = get_project_not_removed(σ, body.source_project_id)
+  if source.visibility == PRIVATE and source.owner_address != data.owner_address:
+    check_project_access(σ, data.owner_address, body.source_project_id, READ)
+
+  require body.source_project_id != body.project_id
+  require fork_lineage(body.source_project_id) reaches body.project_id within MAX_FORK_LINEAGE_DEPTH using retained 0x1A lineage rows
+  require σ[ref_key(body.source_project_id, body.source_ref)] exists
+  require σ[ref_key(body.source_project_id, body.source_ref)].commit_hash == body.source_commit_hash
+  require σ[commit_key(body.source_project_id, body.source_commit_hash)] exists
+  return Ok
+```
+
+Public targets do not require project membership. Private targets require `READ+`. Private sources require source ownership or `READ+`. The target project MUST be `Active`; the source project MAY be `Active` or `Archived`, but not `Removed`.
+
+#### 5.9.2 `MERGE_REQUEST_REMOVE`
+
+`MERGE_REQUEST_REMOVE` uses the protocol's first dual authorization path:
+
+```
+authorize_merge_request_remove(σ, data, signer, body, mr) -> Ok | Err:
+  check_key_scope(σ, data.owner_address, signer, SIGNING)
+
+  let target = get_project_not_removed(σ, body.project_id)
+
+  if data.owner_address == mr.requester_owner_address:
+    return Ok
+
+  if target.owner_address == data.owner_address:
+    return Ok
+
+  let collab = σ[collaborator_key(body.project_id, data.owner_address)]
+  require collab != ⊥ and collab.permission >= WRITE
+  return Ok
+```
+
+The original requester MAY withdraw without current target-project membership. The target project owner or any collaborator with `WRITE+` MAY close any request targeting that project. The target project MAY be `Active` or `Archived`, but MUST NOT be `Removed`.
+
+#### 5.9.3 Retained Fork Lineage Helper
+
+`fork_lineage(source_project_id)` is the chain formed by repeatedly following retained `ForkParentState.parent_project_id` rows under prefix `0x1A`.
+
+`MAX_FORK_LINEAGE_DEPTH = 256`.
+
+Validation succeeds iff the chain starting from `source_project_id` reaches the target `project_id` within at most `256` hops. Implementations MUST fail the check if the chain terminates early, a cycle is detected, an intermediate retained ancestor is missing, or reaching the target would exceed the bound.
+
 ---
 
 ## 6. Storage Model
@@ -723,8 +789,11 @@ State is stored in a merkleized key-value store with prefix-byte namespacing. Al
 | `0x17` | Storage claim marker | `[0x17 \| claim_id:32]` |
 | `0x18` | Finalized message (non-merkleized) | `[0x18 \| hash:32]` |
 | `0x19` | Replay metadata (non-merkleized) | `[0x19 \| 0x01]` |
+| `0x1A` | Fork parent (retained lineage) | `[0x1A \| project_id:32]` |
+| `0x1B` | Merge request (forward) | `[0x1B \| project_id:32 \| request_id:32]` |
+| `0x1C` | Merge request (reverse) | `[0x1C \| requester_owner_address:20 \| project_id:32 \| request_id:32]` |
 
-Prefixes `0x07`, `0x0C`, `0x11`, and `0x13` are reverse indexes. Prefix `0x02` stores committed block data for persistence and replay. Prefix `0x03` stores 2P set tombstones — each tombstone key is `[0x03 | active_key]` mapping to the remove timestamp (`u32`), enabling durable remove-wins resolution. Prefix `0x16` stores the expiring storage grants that drive effective quota. Prefix `0x17` stores consumed storage-claim markers so settlement-backed claims are idempotent after restart or replay.
+Prefixes `0x07`, `0x0C`, `0x11`, `0x13`, and `0x1C` are reverse indexes. Prefix `0x02` stores committed block data for persistence and replay. Prefix `0x03` stores 2P set tombstones — each tombstone key is `[0x03 | active_key]` mapping to the remove timestamp (`u32`), enabling durable remove-wins resolution. Prefix `0x16` stores the expiring storage grants that drive effective quota. Prefix `0x17` stores consumed storage-claim markers so settlement-backed claims are idempotent after restart or replay. Prefix `0x1A` stores retained immediate fork ancestry independently from prunable project rows so merge-request lineage validation remains stable across project cleanup.
 
 **Counter types** for prefix `0x14`:
 
@@ -734,9 +803,13 @@ Prefixes `0x07`, `0x0C`, `0x11`, and `0x13` are reverse indexes. Prefix `0x02` s
 | `0x02` | Reactions |
 | `0x03` | Verifications |
 
-**Merkleized prefixes:** exactly `0x03` through `0x17` inclusive. Prefix `0x02` (blocks) is persisted but non-merkleized. Prefixes `0x18` and `0x19` are non-merkleized operational state used for replay deduplication and crash recovery. Legacy `0x01` message-state storage is not part of the canonical V2 state schema or state root.
+MIP 5 does not allocate a new per-account counter family for merge requests. Requester-scoped reads use the reverse index at `0x1C`.
 
-**Index keys** (not direct protocol state, but merkleized): `0x07` (key reverse), `0x0C` (project name), `0x11` (link reverse), `0x13` (reaction reverse).
+**Merkleized prefixes:** exactly `0x03` through `0x17` inclusive, plus `0x1A`, `0x1B`, and `0x1C`. Prefix `0x02` (blocks) is persisted but non-merkleized. Prefixes `0x18` and `0x19` are non-merkleized operational state used for replay deduplication and crash recovery. Legacy `0x01` message-state storage is not part of the canonical V2 state schema or state root.
+
+**Index keys** (not direct protocol state, but merkleized): `0x07` (key reverse), `0x0C` (project name), `0x11` (link reverse), `0x13` (reaction reverse), `0x1C` (merge request reverse).
+
+`ProjectState` includes `merge_request_count: u32`, which MUST equal the number of active merge-request forward rows under `[0x1B | project_id]`. Implementations MUST maintain the counter across add, remove, and active-entry prune operations, and the field MUST be serialized even when its value is `0`.
 
 ### 6.2 Fixed-Size Key Encoding
 
@@ -771,8 +844,11 @@ The public operation/exclusion proof allowlist is limited to:
 - project-name index keys under prefix `0x0C`
 - collaborator keys under prefix `0x0F`
 - storage-grant keys under prefix `0x16`
+- merge-request active keys under prefix `0x1B`
 
-The public compound-proof allowlist is limited to active keys under prefixes `0x09`, `0x0A`, `0x0F`, `0x10`, and `0x12`.
+The public compound-proof allowlist is limited to active keys under prefixes `0x09`, `0x0A`, `0x0F`, `0x10`, `0x12`, and `0x1B`.
+
+Reverse merge-request rows under `0x1C` are not part of the public proof surface. Retained fork-lineage rows under `0x1A` are canonical state but are not part of the public proof surface.
 
 **Storage quota proof:** Authenticates the complete active storage-grant suffix for an `owner_address` at an explicit `as_of_unix_time` against the current root. A grant is **active** at time `T` if and only if `expires_at > T`. Because the storage grant key layout (Section 6.1, prefix `0x16`) embeds `expires_at` in big-endian immediately after `owner_address`, all grants for a given account are sorted by expiration time in ascending order, enabling efficient range-based proof construction. It is not a historical-state proof — it proves quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
 
@@ -816,6 +892,8 @@ These checks require no state lookups and MUST be performed before any state acc
 | `SIGNER_REMOVE` | `key`: 32 bytes; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 3; `custody_block_hash`: exactly 32 bytes iff `custody_key_type = 3` |
 | `REACTION_ADD/REMOVE` | `type ≠ NONE`; `target_project_id`: 32 bytes; `target_commit_hash`: 32 bytes |
 | `STORAGE_CLAIM` | `owner_address`: 20 bytes; `actor`: 20 bytes; `units > 0`; `settlement_tx_hash`: 32 bytes; `settlement_chain_id = host_chain_id(network)` |
+| `MERGE_REQUEST_ADD` | `project_id`: 32 bytes; `source_project_id`: 32 bytes and not equal to `project_id`; `source_ref`: 1-254 bytes, no `0x00`; `source_commit_hash`: 32 bytes; `target_ref`: 1-254 bytes, no `0x00`; `title`: 1-200 bytes when UTF-8 encoded |
+| `MERGE_REQUEST_REMOVE` | `project_id`: 32 bytes; `request_id`: 32 bytes |
 
 ### 7.2 State Validation (Stateful)
 
@@ -834,6 +912,8 @@ These checks require state lookups:
 - **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
 - **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op.
+- **`MERGE_REQUEST_ADD`:** Target project exists and is `Active`; source project exists and is not `Removed`; `source_project_id != project_id`; the source project's retained `0x1A` fork-parent chain reaches the target within `MAX_FORK_LINEAGE_DEPTH = 256`; private-target and private-source access checks pass; `source_ref` exists in the source project and resolves exactly to `source_commit_hash`; the referenced source commit exists; the target project's merge-request family remains within effective quota after expired-grant sweep and pending-add reservation.
+- **`MERGE_REQUEST_REMOVE`:** Target project exists and is not `Removed`; an active merge request exists at `(project_id, request_id)`; either requester withdrawal or target-project `WRITE+` maintainer closure authorization succeeds; source project status is not checked.
 
 ---
 
@@ -1011,6 +1091,22 @@ If `claim_key_type = 3`, `claim_block_hash` MUST be exactly 32 bytes, MUST ident
 
 **SOL_ADDRESS** — Ed25519 signature over `"makechain:verify:<network>:<owner_address_hex>"`. On the wire, the verification address MUST be the raw 32-byte Ed25519 public key and `VerificationAddBody.chain_id` MUST be empty.
 
+### 9.7 Public Query Surfaces
+
+Merge-request queries are public, including for projects whose visibility is `PRIVATE`. This follows the V2 read model, where visibility constrains mutation authorization rather than canonical state reads.
+
+The public RPC surface includes:
+
+- `GetMergeRequest(project_id, request_id)` — returns the active merge request summary or `NOT_FOUND` if the request is absent, removed, or pruned
+- `ListMergeRequests(project_id, cursor, limit, requester_owner_address?)` — lists active merge requests for a target project, ordered by forward-key lexicographic order
+- `ListMergeRequestsByRequester(owner_address, cursor, limit)` — lists active merge requests opened by a requester, ordered by reverse-key lexicographic order `(project_id, request_id)`
+
+`MergeRequestSummary` includes `request_id`, `project_id`, `requester_owner_address`, `source_project_id`, `source_ref`, `source_commit_hash`, `target_ref`, `title`, and `added_at`.
+
+Generic message surfaces keyed by `MessageType`, including `ListMessages`, `GetProjectActivity`, `GetAccountActivity`, and `SubscribeMessages`, MUST recognize `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE`. For project-filtered generic surfaces, both message types are associated with the target `project_id`.
+
+Closure attribution is historical rather than canonical-state derived: clients that need to distinguish requester withdrawal from maintainer closure MUST inspect finalized `MERGE_REQUEST_REMOVE` history for the same `(project_id, request_id)` pair and compare the closer's `owner_address` with the original requester.
+
 ---
 
 ## 10. Networking
@@ -1064,6 +1160,7 @@ Limits scale with active rented storage units:
 | Commit metadata per project | 10,000 |
 | Refs per project | 200 |
 | Collaborators per project | `50 + storage_units × 50` |
+| Merge requests per target project | `20 + storage_units × 20` |
 | Keys per account | 1,000 |
 | Verifications per account | `50 + storage_units × 50` |
 | Links per account | `5,000 + storage_units × 5,000` |
@@ -1074,7 +1171,7 @@ Limits scale with active rented storage units:
 
 Each `STORAGE_CLAIM` creates a storage grant that expires at `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` (395 days). Expiry is enforced lazily on mutation paths that consume or free quota: when an account is touched by a quota-enforcing state transition, expired grants are swept, active units recomputed, and pruning re-run if capacity dropped.
 
-Non-quota project-level operations (`REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `PROJECT_METADATA`, `PROJECT_ARCHIVE`) do NOT trigger storage-grant sweeps. Quota-enforcing paths such as `PROJECT_CREATE`, `FORK`, and collaborator/link/verification/reaction mutations MUST sweep before enforcement.
+Non-quota project-level operations (`REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `PROJECT_METADATA`, `PROJECT_ARCHIVE`) do NOT trigger storage-grant sweeps. Quota-enforcing paths such as `PROJECT_CREATE`, `FORK`, collaborator/link/verification/reaction mutations, and `MERGE_REQUEST_ADD` MUST sweep before enforcement.
 
 Read-only queries MAY derive effective quota from currently active grants without mutating persisted state.
 
@@ -1109,7 +1206,7 @@ prune_commits(σ, project_id, max_commits):
 
 ### 11.4 Quota Pruning
 
-For links, verifications, reactions, and collaborators, quota accounting includes active entries plus tombstones. When a scoped family exceeds its effective limit, oldest entries are pruned first, ordered by entry timestamp ascending and then by active-key lexicographic order. A prune marker stores the pruned entry's timestamp and acts as a pseudo-tombstone during later add resolution.
+For links, verifications, reactions, collaborators, and merge requests, quota accounting includes active entries plus tombstones. When a scoped family exceeds its effective limit, oldest entries are pruned first, ordered by entry timestamp ascending and then by active-key lexicographic order. A prune marker stores the pruned entry's timestamp and acts as a pseudo-tombstone during later add resolution. For merge requests, pruning an active entry MUST also delete the matching reverse row and decrement `project.merge_request_count`. Merge-request quota is funded by the target project's owner because the state lives in the target project's namespace.
 
 ---
 
@@ -1242,7 +1339,7 @@ The canonical wire format for all protocol messages is [Protocol Buffers v3][pro
 
 ### B.1 Canonical Encoding Rules
 
-The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. For `2026.4.1`, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
+The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. In this version, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
 
 The reference encoding follows these rules:
 
@@ -1333,6 +1430,24 @@ For every forward entry under prefixes `0x06`, `0x10`, `0x12`, the corresponding
 ### INV-11: Storage Claim Idempotence
 Once a `claim_id` is persisted under prefix `0x17`, any subsequent `STORAGE_CLAIM` carrying the same logical settlement coordinates MUST be a no-op.
 
+### INV-12: Merge Request Count Consistency
+For every project, `project.merge_request_count` MUST equal the count of active merge-request forward rows under `[0x1B | project_id]`.
+
+### INV-13: Merge Request Reverse Index Consistency
+For every active merge-request forward row there MUST be exactly one matching reverse row, and vice versa. Handlers and cleanup paths MUST maintain both atomically.
+
+### INV-14: Merge Request Closure Attribution Is Historical
+Canonical merge-request state does not record who closed a request. Closure attribution exists only in finalized `MERGE_REQUEST_REMOVE` history.
+
+### INV-15: Merge Request Content-Addressed Uniqueness
+A merge-request identity is `request_id = Message.hash` of the `MERGE_REQUEST_ADD` message. Re-opening therefore requires a fresh add and a fresh identity.
+
+### INV-16: Cross-Project Lineage Integrity
+Every accepted `MERGE_REQUEST_ADD` points from a source project whose retained `0x1A` fork-parent chain reaches the target project within `MAX_FORK_LINEAGE_DEPTH` hops.
+
+### INV-17: Source Ref Binding
+Every accepted `MERGE_REQUEST_ADD` binds a concrete source ref head at creation time: `ref(source_project_id, source_ref).commit_hash == source_commit_hash`.
+
 ## Appendix E: Genesis State
 
 The genesis state `σ₀` is the empty key-value store. No pre-registered accounts, projects, or validator identities exist in protocol state. The genesis block (block 0) has:
@@ -1351,6 +1466,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.5.0 | 2026-04-15 | Canonically integrate MIP 5 merge requests: add `MERGE_REQUEST_ADD` / `MERGE_REQUEST_REMOVE`, retained fork-lineage rows, merge-request quota and proof surfaces, dual close authorization, public merge-request queries, and merge-request correctness invariants. |
 | 2026.4.1 | 2026-04-10 | Align the canonical specification with MIP 3 clean-slate semantics: keep `Genesis` as the reset-network baseline hardfork, complete ERC-1271 and address-derivation rules, clarify duplicate `STORAGE_CLAIM` idempotence and claim-id construction, tighten message and network validation, and make state-value encoding fully normative. |
 | 2026.4.0 | 2026-04-05 | Replace canonical relay payload commitment with canonical `ExecutionPayload`, require version `5`, remove `relay_checkpoint` from canonical block and payload encoding, and require persisted `(Block, ExecutionPayload)` verification. |
 | 2026.3.3 | 2026-03-30 | Commit `relay_checkpoint` in `BlockHeader` and `RelayPayload`, define tri-state replay verification and `ReplayVerificationStatus`, document replay-sensitive fail-closed surfaces, and specify the genesis zero-checkpoint sentinel. |
