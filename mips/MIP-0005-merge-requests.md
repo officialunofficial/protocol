@@ -20,7 +20,7 @@ It has six parts:
 2. Define dual authorization for `MERGE_REQUEST_REMOVE`: the original requester MAY withdraw without project membership, and a project member with `WRITE+` permission MAY close the request.
 3. Preserve fork ancestry in a retained canonical lineage index so merge-request lineage validation does not depend on prunable project rows.
 4. Store merge request state under target-project-namespaced keys with a requester reverse index, following existing tombstone-backed 2P-set patterns (tombstones, prune markers, compound proofs).
-5. Extend `ProjectState` with a `merge_request_count` counter and apply project-owner-funded storage limits.
+5. Extend `ProjectState` with a `merge_request_count` counter and apply requester-funded global storage limits with a target-project namespace ceiling.
 6. Expose public merge request queries via gRPC and the REST gateway.
 
 This proposal does not change how projects are created, fork authorization or identity derivation, or how commits and refs are updated. It does require `FORK` to persist a retained immediate-parent lineage row for later merge-request validation. Merge resolution remains application-layer: the protocol records the proposal, and acceptance is performed by a project member submitting `COMMIT_BUNDLE` and `REF_UPDATE` messages on the target project, then closing the merge request.
@@ -236,13 +236,15 @@ Key authorization properties:
 authorize_merge_request_remove(σ, data, signer, body, mr) -> Ok | Err:
   check_key_scope(σ, data.owner_address, signer, SIGNING)
 
-  let target = get_project_not_removed(σ, body.project_id)
-
   // Path 1: requester withdrawal
+  // This path is allowed even if the target project is Removed,
+  // provided the active merge-request row still exists.
   if data.owner_address == mr.requester_owner_address:
     return Ok
 
   // Path 2: target project owner or collaborator with WRITE+
+  // Maintainer closure still requires a target project that is not Removed.
+  let target = get_project_not_removed(σ, body.project_id)
   if target.owner_address == data.owner_address:
     return Ok
 
@@ -254,9 +256,9 @@ authorize_merge_request_remove(σ, data, signer, body, mr) -> Ok | Err:
 Key authorization properties:
 
 1. This is the first message type with a dual authorization path.
-2. The original requester MAY withdraw their merge request without any permission on the target project.
-3. A target project owner or collaborator with `WRITE+` permission MAY close any merge request targeting that project.
-4. The target project MUST NOT be `Removed`, but MAY be `Archived` so that maintainers can clean up merge requests on archived projects.
+2. The original requester MAY withdraw their merge request without any permission on the target project, including when the target project has become `Removed`, provided the active merge-request row still exists.
+3. A target project owner or collaborator with `WRITE+` permission MAY close any merge request targeting that project only while the target project is not `Removed`.
+4. The target project MAY be `Active` or `Archived` for maintainer closure.
 
 ### 5. State Transitions
 
@@ -281,9 +283,17 @@ handle_merge_request_add(σ, msg, data, body, signer) -> σ':
     return σ
 
   let project = get_project_active(σ, body.project_id)
+
+  // Layer 1: Requester global active-entry quota (reject-on-exceed)
+  sweep_expired_storage_grants(σ, data.owner_address, data.timestamp)
+  let requester_limit = max_merge_requests_per_requester(active_storage_units(data.owner_address))
+  let requester_active = count_requester_active_merge_requests(σ, data.owner_address)
+  require requester_active + 1 <= requester_limit
+
+  // Layer 2: Target-project namespace ceiling (auto-prune, project-local)
   sweep_expired_storage_grants(σ, project.owner_address, data.timestamp)
-  let limit = max_merge_requests_per_project(active_storage_units(project.owner_address))
-  make_room_for_merge_request_add(σ, body.project_id, project.owner_address, limit, data.timestamp)
+  let project_limit = max_merge_requests_per_project(active_storage_units(project.owner_address))
+  enforce_project_merge_request_ceiling(σ, body.project_id, project.owner_address, project_limit, pending_adds=1)
 
   let mr = MergeRequestState {
     requester_owner_address: data.owner_address,
@@ -350,9 +360,10 @@ Consequences:
 Required justification:
 
 1. Merge request state is stored under the target project's namespace.
-2. Merge requests targeting different projects are independent and preserve project isolation.
-3. Merge requests targeting the same project MUST serialize for 2P-set consistency.
-4. This MIP does not introduce requester-account state mutation, so project-group execution remains the correct classification.
+2. Layer 2 pruning and active merge-request state remain target-project-scoped, preserving project-local mutation boundaries.
+3. `MERGE_REQUEST_ADD` introduces requester-global Layer 1 quota checks, so adds by the same requester against different target projects are no longer fully independent for scheduling purposes.
+4. Merge requests targeting the same project MUST serialize for 2P-set consistency.
+5. Phase 2 project grouping remains the chosen classification, but implementations MUST preserve the canonical serial execution order because requester-global Layer 1 quota introduces cross-project admission dependencies.
 
 ### 6. Validation
 
@@ -389,14 +400,15 @@ Required justification:
 7. If the target project is private, `data.owner_address` MUST be the target owner or a collaborator with `READ+` permission.
 8. `source_ref` MUST exist in the source project and MUST resolve exactly to `source_commit_hash` at execution time.
 9. `source_commit_hash` MUST exist as a commit in the source project.
-10. The target project's merge-request family MUST satisfy effective storage limits after expired grant sweeping and quota enforcement with one pending add reserved.
+10. `MERGE_REQUEST_ADD` MUST satisfy both quota layers after expired grant sweeping with one pending add reserved: (a) the requester's global active-entry limit (reject-on-exceed), and (b) the target project's namespace ceiling (project-local active-plus-tombstone enforcement).
 
 `MERGE_REQUEST_REMOVE`:
 
-1. Target project MUST be not `Removed`; `Archived` is allowed.
-2. The merge request identified by `(project_id, request_id)` MUST exist as an active entry.
-3. Authorization MUST satisfy either requester withdrawal or target-project `WRITE+` closure.
-4. The source project's status is not checked — the source project may have been removed or archived between `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` without preventing closure.
+1. The merge request identified by `(project_id, request_id)` MUST exist as an active entry.
+2. If the remover is the original requester, closure is allowed regardless of whether the target project is `Active`, `Archived`, or `Removed`, provided the active merge-request row still exists.
+3. If the remover is not the original requester, the target project MUST be not `Removed`; `Archived` is allowed.
+4. Authorization MUST satisfy either requester withdrawal or target-project `WRITE+` maintainer closure.
+5. The source project's status is not checked — the source project may have been removed or archived between `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` without preventing closure.
 
 ### 7. Storage Limits and Pruning
 
@@ -406,7 +418,12 @@ A new row is added to the effective limits table:
 
 | Resource | Effective Limit |
 |----------|-----------------|
-| Merge requests per project | `20 + storage_units × 20` |
+| Merge requests per requester (global, active entries only) | `20 + requester_storage_units × 20` |
+| Merge requests per target project (active + tombstones, namespace ceiling) | `20 + target_owner_storage_units × 20` |
+
+`requester_storage_units` is the active storage capacity of the requester's account after expired grant sweeping.
+
+`target_owner_storage_units` is the active storage capacity of the target project's canonical owner after expired grant sweeping. This value determines the namespace ceiling for the target project but does not consume the owner's storage budget.
 
 #### 7.2 Storage-sensitive classification
 
@@ -414,13 +431,30 @@ A new row is added to the effective limits table:
 
 #### 7.3 Quota enforcement
 
-`enforce_merge_request_limit()` follows the existing quota-pruning model used for other tombstone-backed 2P families:
+Merge request quota is enforced in two independent layers during `MERGE_REQUEST_ADD` execution:
+
+**Layer 1: Requester global active-entry quota (reject-on-exceed)**
+
+`count_requester_active_merge_requests()` enumerates the requester's active merge requests globally:
+
+1. Scan the reverse index prefix `[0x1C | requester_owner_address]`.
+2. For each reverse entry at `[0x1C | requester | project_id | request_id]`, check whether the corresponding forward entry at `[0x1B | project_id | request_id]` exists.
+3. Count only entries where the forward row exists. Entries where the forward row has been deleted (by `MERGE_REQUEST_REMOVE` or quota pruning) are not counted.
+4. Return the count of active entries.
+
+This count is compared against `max_merge_requests_per_requester(requester_units)`. If `active_count + 1 > limit`, the `MERGE_REQUEST_ADD` is rejected. The requester must close an existing merge request before opening a new one.
+
+The requester can free Layer 1 capacity through the withdrawal path in `MERGE_REQUEST_REMOVE` authorization (comparing `owner_address` with `mr.requester_owner_address`), which requires no target-project membership or permission and remains available even if the target project has become `Removed`, provided the active merge-request row still exists.
+
+**Layer 2: Target-project namespace ceiling (auto-prune, project-local)**
+
+`enforce_project_merge_request_ceiling()` follows the existing tombstone-backed pruning model, scoped to the target project only:
 
 1. Enumerate all active merge requests under `[0x1B | project_id]`.
 2. Enumerate all merge-request tombstones under `[0x03 | 0x1B | project_id | ...]`.
 3. Construct the counted set as `active entries + tombstones`.
 4. Order entries by timestamp ascending, then by active-key lexicographic order.
-5. Evaluate quota against `entries.len() + pending_adds` where `pending_adds` is the number of new active rows that the caller intends to write after enforcement.
+5. Evaluate quota against `entries.len() + pending_adds`.
 6. If `entries.len() + pending_adds <= limit`, return `Ok(())`.
 7. Otherwise, prune the oldest entry by writing a prune marker and deleting the corresponding active row and reverse row if they still exist.
 8. Repeat pruning until `entries.len() + pending_adds <= limit`.
@@ -428,15 +462,17 @@ A new row is added to the effective limits table:
 
 Required semantics:
 
-1. Both active entries and tombstones count toward the project limit during enforcement.
-2. `MERGE_REQUEST_ADD` MUST invoke quota enforcement with `pending_adds = 1` before writing the new active row, so a successful add MUST NOT leave the family above `max_merge_requests_per_project(...)`.
-3. Delete-on-prune MUST remove the matching requester reverse row whenever an active forward row is pruned.
-4. Prune markers follow the same subsumption rules as existing 2P set types.
-5. Storage grant expiry is enforced lazily through the same sweep-before-enforce pattern used by other quota-sensitive families on this branch.
+1. **Layer 1 counts only active entries** (via the reverse index). Tombstones are not visible through the reverse index because reverse rows are deleted on close/prune, so tombstones do not count against the requester's quota.
+2. **Layer 2 counts active entries + tombstones** (via forward-key prefix scan). This bounds the total namespace footprint under the target project, including residual tombstone state.
+3. **Layer 1 is enforced first.** If the requester is over their global limit, the add is rejected before any project-local pruning occurs.
+4. **Layer 2 auto-pruning is project-local.** It only deletes entries within the target project's namespace, preserving project isolation.
+5. `MERGE_REQUEST_ADD` MUST invoke both layers before writing the new active row.
+6. Delete-on-prune MUST remove the matching requester reverse row whenever an active forward row is pruned.
+7. Prune markers follow the same subsumption rules as existing 2P set types.
 
 #### 7.4 Quota enforcement during add
 
-`MERGE_REQUEST_ADD` sweeps expired storage grants for the target project's owner before reserving quota capacity and writing the new active row. The target project's owner funds merge-request capacity because merge requests consume the target project's namespace.
+`MERGE_REQUEST_ADD` sweeps expired storage grants for both the requester's account (Layer 1) and the target project's owner (Layer 2) before reserving quota capacity and writing the new active row. The requester funds their own capacity globally. The target project's namespace ceiling uses the owner's storage units as a scaling parameter but does not consume the owner's storage budget.
 
 ### 8. Proof Surface
 
@@ -627,11 +663,14 @@ Why public queries even for private projects:
 2. Visibility affects mutation authorization, especially `FORK`, rather than public query surfaces.
 3. Public discoverability is part of the value of a protocol-level merge-request primitive.
 
-Why project-owner-funded quota:
+Why requester-funded global quota with a target-project namespace ceiling:
 
-1. Merge requests consume the target project's namespace and indexing surface.
-2. This matches existing per-project quota reasoning better than charging the requester account.
-3. The owner or maintainers can close stale requests and recover capacity through normal pruning behavior.
+1. Merge requests are initiated by the requester. Charging the requester's active-entry capacity aligns cost with action and eliminates the target-owner-budget griefing vector for public projects.
+2. A global per-requester limit prevents spray attacks: opening requests against many projects still consumes the same pool.
+3. The reverse index at prefix `0x1C` already groups merge requests by requester, making global per-requester counting efficient without adding new state families.
+4. The target-project namespace ceiling (`20 + target_owner_units × 20`) bounds total state growth under any single project. It uses the owner's storage units as a scaling parameter but does not consume the owner's budget — it is a ceiling, not a charge.
+5. The target project's `merge_request_count` counter is maintained unchanged, preserving the ability to query how many active merge requests a project has.
+6. This removes the target-owner-budget rationale for a protocol-level inbound-merge-request disable flag. Project-level opt-out remains out of scope; clients that wish to ignore merge requests can filter at the application layer, and Layer 2 bounds residual target-local namespace pressure.
 
 ### 13. Reset Assumption
 
@@ -655,10 +694,6 @@ Rejected because it would limit each requester to one open merge request per pro
 
 Rejected because finalized history already provides attribution, while extra canonical state would introduce merge-request-specific complexity that existing Makechain patterns do not need.
 
-#### Charging requester storage quota instead of target-project quota
-
-Rejected because merge requests consume the target project's namespace, not the requester's namespace.
-
 #### Allowing merge requests from arbitrary unrelated projects
 
 Rejected because this proposal is intended to represent fork-to-upstream contribution flows, not arbitrary cross-project references.
@@ -674,8 +709,8 @@ This proposal introduces a new project-scoped namespace that can be populated by
 Spam resistance:
 
 1. Opening merge requests requires a registered delegated key with `SIGNING` scope.
-2. The per-project quota limit bounds merge-request state growth.
-3. Quota enforcement uses existing prune-marker semantics and oldest-first pruning.
+2. The per-requester global active-entry quota bounds how many merge requests a single account can have open across all projects, preventing one account from flooding any single project or spraying across many projects.
+3. The per-target-project namespace ceiling bounds total state growth (active + tombstones) under any single project, preventing unbounded accumulation even when many requesters target the same project.
 4. Fork-lineage validation is bounded to `MAX_FORK_LINEAGE_DEPTH = 256` hops, capping per-message ancestry traversal and preventing adversarial deep-fork-chain execution costs.
 5. Retained fork-lineage rows preserve ancestry validation across project pruning so merge-request eligibility does not depend on long-term retention of removed project rows.
 
@@ -706,14 +741,14 @@ This MIP is considered specified when all of the following are true:
 3. `MergeRequestAddBody` validates `project_id` (32 bytes), `source_project_id` (32 bytes, not equal to `project_id`), `source_ref` (1-254 bytes, no null bytes), `source_commit_hash` (32 bytes), `target_ref` (1-254 bytes, no null bytes), and `title` (1-200 UTF-8 bytes).
 4. `MergeRequestRemoveBody` validates `project_id` (32 bytes) and `request_id` (32 bytes).
 5. `MERGE_REQUEST_ADD` requires `SIGNING` scope, with no membership requirement for public targets, `READ+` for private targets, and `READ+` for private source projects unless the requester is the source owner.
-6. `MERGE_REQUEST_REMOVE` has dual authorization: requester withdrawal or target-project owner/collaborator with `WRITE+` permission, while allowing archived targets.
+6. `MERGE_REQUEST_REMOVE` has dual authorization: requester withdrawal or target-project owner/collaborator with `WRITE+` permission. Requester withdrawal remains valid even if the target project has become `Removed`, provided the active merge-request row still exists. Maintainer closure still requires a target project that is not `Removed`, and `Archived` targets remain closable.
 7. Merge request identity is content-addressed as `request_id = Message.hash`.
 8. `MERGE_REQUEST_ADD` requires `source_project_id` to be in the target project's retained fork lineage within `MAX_FORK_LINEAGE_DEPTH = 256` hops, and validation fails if traversal terminates early, encounters a cycle, encounters a missing retained intermediate ancestor, or would exceed that bound.
 9. Immediate fork ancestry is stored under retained prefix `0x1A`, written by `FORK`, and preserved across project removal and project-subtree pruning.
 10. Merge request state is stored at prefix `0x1B` with reverse index at prefix `0x1C` keyed by requester owner address.
 11. `ProjectState.merge_request_count` is incremented on add and decremented on remove or active-entry prune, and is serialized as part of canonical `ProjectState` values.
 12. `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` are classified as Phase 2 project messages grouped by target `project_id`.
-13. Storage-limit enforcement follows `max_merge_requests_per_project(units) = 20 + units × 20` with active-plus-tombstone counting, prune-marker semantics, matching reverse-row deletion on active prune, and pending-add reservation so successful adds cannot leave the family above limit.
+13. Storage-limit enforcement uses two independent layers: (a) a requester global active-entry quota with formula `max_merge_requests_per_requester(units) = 20 + requester_units × 20`, enforced by reject-on-exceed with counting via the reverse index at `[0x1C | requester_owner_address]`; and (b) a target-project namespace ceiling with formula `max_merge_requests_per_project(units) = 20 + target_owner_units × 20`, enforced by project-local auto-pruning with active-plus-tombstone counting under `[0x1B | project_id]`, prune-marker semantics, matching reverse-row deletion on active prune, and pending-add reservation. Layer 1 is enforced before Layer 2.
 14. Both message types are listed as storage-sensitive.
 15. Public operation, exclusion, and compound proofs support merge-request active keys, while retained fork-lineage rows under `0x1A` remain off the public proof surface.
 16. gRPC queries have canonical protobuf request/response definitions for `GetMergeRequest`, `ListMergeRequests`, and `ListMergeRequestsByRequester`, including pagination cursors and the optional requester owner-address filter on `ListMergeRequests`.
@@ -738,8 +773,8 @@ Modified files:
 | `crates/makechain-state/src/values.rs` | `MergeRequestState` struct, retained fork-lineage value type for `0x1A`, and `ProjectState.merge_request_count` field |
 | `crates/makechain-state/src/handlers/project.rs` | `FORK` writes retained `0x1A` fork-parent lineage rows |
 | `crates/makechain-state/src/validation.rs` | Structural validation |
-| `crates/makechain-state/src/authorization.rs` | Merge-request auth helpers, including archived-project close path |
-| `crates/makechain-state/src/storage_policy.rs` | `max_merge_requests_per_project()`, merge-request quota enforcement with pending-add reservation, merge-request prune-marker cleanup, target-project subtree cleanup of reverse rows, and preservation of retained `0x1A` lineage rows during project pruning |
+| `crates/makechain-state/src/authorization.rs` | Merge-request auth helpers, including requester withdrawal on removed targets and maintainer close on active/archived targets |
+| `crates/makechain-state/src/storage_policy.rs` | `max_merge_requests_per_requester()`, `max_merge_requests_per_project()`, requester-global active-entry counting, target-project namespace-ceiling enforcement, merge-request prune-marker cleanup, target-project subtree cleanup of reverse rows, and preservation of retained `0x1A` lineage rows during project pruning |
 | `crates/makechain-state/src/transition.rs` | Message dispatch and execution |
 | `crates/makechain-state/src/handlers/mod.rs` | `pub mod merge_requests` |
 | `crates/makechain-api/src/query.rs` | `get_merge_request()`, `list_merge_requests()`, `list_merge_requests_by_requester()`, and generic activity/list-message integration |
@@ -751,7 +786,7 @@ Modified files:
 This proposal's remaining design choices are resolved as follows:
 
 1. `target_ref` remains required in the initial version.
-2. Projects do not gain an inbound-merge-request disable flag in MIP 5.
+2. Projects do not gain an inbound-merge-request disable flag in MIP 5. This removes the target-owner-budget rationale for such a flag, while Layer 2 continues to bound residual target-local namespace pressure.
 3. Public proof exposure for merge-request active keys and compound proofs is enabled in the initial version.
 4. MIP 5 is specified as baseline protocol behavior for a clean-slate reset, with no activation migration or hardfork gating.
 5. `MergeRequestAddBody` and `MergeRequestRemoveBody` use fresh-start oneof field numbers `96` and `97`.
