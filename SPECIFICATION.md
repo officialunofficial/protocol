@@ -8,7 +8,7 @@
 
 A specialized protocol built for making things.
 
-**Version:** 2026.4.2
+**Version:** 2026.4.3
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every committed message is verifiable from canonical state and, where applicable, finalized message-local external evidence.
 
@@ -116,7 +116,7 @@ Message {
 }
 ```
 
-**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](../proto/makechain.proto#L17). For `2026.4.2`, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
+**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](../proto/makechain.proto#L17). For `2026.4.3`, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
 
 The `data_bytes` field (field 5 on [`Message`](../proto/makechain.proto#L9)) caches `canonical_encode(data)` — the same bytes that were hashed. Verifiers re-encode `data` independently and reject the message if `data_bytes` does not match, then check the hash against the re-encoded bytes. `data_bytes` is never used as a hash input directly; it exists so intermediaries can forward the original encoding without re-serializing.
 
@@ -130,9 +130,9 @@ scope(signer) ≤ required_scope(data.type)
 
 **Custody-authorized user messages** (`SIGNER_ADD`, `SIGNER_REMOVE`) — the Ed25519 envelope provides integrity, but authorization comes from an EIP-712 custody signature verified against the account's `owner_address`. These messages bypass the delegated-key registration lookup entirely.
 
-**Settlement-verified authenticated user messages** (`STORAGE_CLAIM`) — the Ed25519 envelope provides integrity and, on first successful application, delegated-key authorization. Successful finalized settlement verification remains additionally mandatory.
+**Settlement-verified storage-funding messages** (`STORAGE_CLAIM`) — the Ed25519 envelope provides integrity, while authorization derives from finalized settlement verification against the claim coordinates and payload. If the claim marker already exists after successful settlement verification, execution is an idempotent no-op.
 
-For `STORAGE_CLAIM`, validators MUST first verify finalized settlement evidence against `owner_address`, `actor`, and `units`. If the claim marker already exists, execution is an idempotent no-op regardless of current delegated-key state. Otherwise the envelope signer MUST be a registered delegated key for `data.owner_address` with required scope `SIGNING`.
+For `STORAGE_CLAIM`, validators MUST first verify finalized settlement evidence against `owner_address`, `actor`, and `units`. If the claim marker already exists, execution is an idempotent no-op. First successful application does not require delegated-key authorization.
 
 ### 2.2 MessageData
 
@@ -147,6 +147,24 @@ MessageData {
 ```
 
 A valid `MessageData` MUST select exactly one body variant, that body MUST match `type`, and `MESSAGE_TYPE_NONE` is invalid for admitted, replayed, or committed messages.
+
+For MIP 4 deployments, the canonical protobuf additions are:
+
+```proto
+message MessageData {
+  oneof body {
+    StorageClaimBody storage_claim = 72;
+    UsernameCreateBody username_create = 73;
+    UsernameUpdateBody username_update = 74;
+  }
+}
+
+enum MessageType {
+  MESSAGE_TYPE_STORAGE_CLAIM = 72;
+  MESSAGE_TYPE_USERNAME_CREATE = 73;
+  MESSAGE_TYPE_USERNAME_UPDATE = 74;
+}
+```
 
 ### 2.3 Message Types
 
@@ -174,8 +192,8 @@ Every message type follows one of two paradigms:
 | Singleton | Irreversible creation | `FORK` |
 | LWW Register | Timestamp-based last-write-wins | `PROJECT_METADATA`, `ACCOUNT_DATA` |
 | Append-only | Monotonic growth, protocol-pruned | `COMMIT_BUNDLE` |
-| State transition | Terminal state change | `PROJECT_ARCHIVE` |
-| Settlement-verified authenticated user message | Finalized settlement verification plus delegated-key authorization on first successful application | `STORAGE_CLAIM` |
+| State transition | Deterministic preconditioned state rewrite | `PROJECT_ARCHIVE`, `USERNAME_CREATE`, `USERNAME_UPDATE` |
+| Settlement-verified storage-funding message | Finalized settlement verification and marker-idempotent replay | `STORAGE_CLAIM` |
 | Custody-authorized | Authorization from EIP-712 custody signature | `SIGNER_ADD`, `SIGNER_REMOVE` |
 
 **2P (two-phase)** — Add/Remove pairs operating on a set.
@@ -194,21 +212,23 @@ Every message type follows one of two paradigms:
 | `PROJECT_ARCHIVE` | 3 | 1P Transition | SIGNING | [`ProjectArchiveBody`](../proto/makechain.proto#L233) |
 | `FORK` | 4 | 1P Singleton | SIGNING | [`ForkBody`](../proto/makechain.proto#L168) |
 | `PROJECT_REMOVE` | 5 | 2P Set | SIGNING | [`ProjectRemoveBody`](../proto/makechain.proto#L155) |
-| `REF_UPDATE` | 6 | 2P CAS | AGENT | [`RefUpdateBody`](../proto/makechain.proto#L241) |
-| `REF_DELETE` | 7 | 2P CAS | AGENT | [`RefDeleteBody`](../proto/makechain.proto#L256) |
-| `COMMIT_BUNDLE` | 8 | 1P Append | AGENT | [`CommitBundleBody`](../proto/makechain.proto#L212) |
-| `COLLABORATOR_ADD` | 9 | 2P Set | SIGNING (ADMIN) | [`CollaboratorAddBody`](../proto/makechain.proto#L267) |
-| `COLLABORATOR_REMOVE` | 10 | 2P Set | SIGNING (ADMIN) | [`CollaboratorRemoveBody`](../proto/makechain.proto#L273) |
-| `ACCOUNT_DATA` | 11 | 1P LWW | SIGNING | [`AccountDataBody`](../proto/makechain.proto#L195) |
-| `VERIFICATION_ADD` | 12 | 2P Set | SIGNING | [`VerificationAddBody`](../proto/makechain.proto#L325) |
-| `VERIFICATION_REMOVE` | 13 | 2P Set | SIGNING | [`VerificationRemoveBody`](../proto/makechain.proto#L332) |
-| `STORAGE_CLAIM` | 14 | Settlement-verified authenticated user message | `SIGNING` on first successful application only; duplicate replay short-circuits after settlement verification | [`StorageClaimBody`](../proto/makechain.proto#L338) |
-| `LINK_ADD` | 15 | 2P Set | SIGNING | [`LinkAddBody`](../proto/makechain.proto#L346) |
-| `LINK_REMOVE` | 16 | 2P Set | SIGNING | [`LinkRemoveBody`](../proto/makechain.proto#L354) |
-| `REACTION_ADD` | 17 | 2P Set | SIGNING | [`ReactionAddBody`](../proto/makechain.proto#L372) |
-| `REACTION_REMOVE` | 18 | 2P Set | SIGNING | [`ReactionRemoveBody`](../proto/makechain.proto#L378) |
-| `SIGNER_ADD` | 19 | Custody-auth | (custody sig) | [`SignerAddBody`](../proto/makechain.proto#L397) |
-| `SIGNER_REMOVE` | 20 | Custody-auth | (custody sig) | [`SignerRemoveBody`](../proto/makechain.proto#L412) |
+| `REF_UPDATE` | 10 | 2P CAS | AGENT | [`RefUpdateBody`](../proto/makechain.proto#L241) |
+| `REF_DELETE` | 11 | 2P CAS | AGENT | [`RefDeleteBody`](../proto/makechain.proto#L256) |
+| `COMMIT_BUNDLE` | 20 | 1P Append | AGENT | [`CommitBundleBody`](../proto/makechain.proto#L212) |
+| `COLLABORATOR_ADD` | 30 | 2P Set | SIGNING (ADMIN) | [`CollaboratorAddBody`](../proto/makechain.proto#L267) |
+| `COLLABORATOR_REMOVE` | 31 | 2P Set | SIGNING (ADMIN) | [`CollaboratorRemoveBody`](../proto/makechain.proto#L273) |
+| `ACCOUNT_DATA` | 40 | 1P LWW | SIGNING | [`AccountDataBody`](../proto/makechain.proto#L195) |
+| `VERIFICATION_ADD` | 60 | 2P Set | SIGNING | [`VerificationAddBody`](../proto/makechain.proto#L325) |
+| `VERIFICATION_REMOVE` | 61 | 2P Set | SIGNING | [`VerificationRemoveBody`](../proto/makechain.proto#L332) |
+| `STORAGE_CLAIM` | 72 | Settlement-verified storage-funding message | none; duplicate replay short-circuits after settlement verification | [`StorageClaimBody`](../proto/makechain.proto#L338) |
+| `USERNAME_CREATE` | 73 | 1P State transition | SIGNING | `UsernameCreateBody` |
+| `USERNAME_UPDATE` | 74 | 1P State transition | SIGNING | `UsernameUpdateBody` |
+| `LINK_ADD` | 80 | 2P Set | SIGNING | [`LinkAddBody`](../proto/makechain.proto#L346) |
+| `LINK_REMOVE` | 81 | 2P Set | SIGNING | [`LinkRemoveBody`](../proto/makechain.proto#L354) |
+| `REACTION_ADD` | 82 | 2P Set | SIGNING | [`ReactionAddBody`](../proto/makechain.proto#L372) |
+| `REACTION_REMOVE` | 83 | 2P Set | SIGNING | [`ReactionRemoveBody`](../proto/makechain.proto#L378) |
+| `SIGNER_ADD` | 14 | Custody-auth | (custody sig) | [`SignerAddBody`](../proto/makechain.proto#L397) |
+| `SIGNER_REMOVE` | 15 | Custody-auth | (custody sig) | [`SignerRemoveBody`](../proto/makechain.proto#L412) |
 
 † `PROJECT_CREATE` is paired with `PROJECT_REMOVE` as a 2P Set, but does not follow the generic `apply_2p_add` re-add path because `project_id` is content-addressed (Section 2.5). See Section 4.2 for the specific semantics.
 
@@ -250,10 +270,10 @@ An account is identified by `owner_address` (`bytes(20)`). Each account's state 
 | `verifications` | 2P Set | External address ownership proofs. |
 | `links` | 2P Set | Follow/star relationships. |
 | `reactions` | 2P Set | Commit reactions. |
-| `storage_units` | `uint32` | Active storage capacity derived from unexpired storage grants. |
+| `storage_units` | `uint32` | Raw active storage grants derived from unexpired storage-grant rows. |
 | `project_count` | `uint32` | Number of owned projects. |
 | `key_count` | `uint32` | Number of registered delegated keys. |
-| `username` | `string \| null` | Canonical lowercase username bound to the account while effective active storage remains nonzero. |
+| `username` | `string \| null` | Canonical lowercase username when the account has completed username registration and still has active storage. |
 
 There is no onchain account allocation, transfer, or recovery flow in V2.
 
@@ -275,15 +295,17 @@ V2 has no relay-injected identity or signer-management messages.
 
 The only live delegated-key management flow is custody-authorized `SIGNER_ADD` / `SIGNER_REMOVE`, authorized directly against `owner_address`.
 
-The only Tempo-backed storage ingress is `STORAGE_CLAIM`, a user-submitted message whose first successful application requires both verified finalized settlement data and delegated-key authorization with scope `SIGNING`. Duplicate replay remains anchored to settled claim coordinates rather than current delegated-key state.
+The only Tempo-backed storage ingress is `STORAGE_CLAIM`, a settlement-verified user-submitted message that funds raw storage grants. Username control is handled separately by delegated-key-authorized `USERNAME_CREATE` and `USERNAME_UPDATE` messages. Duplicate replay remains anchored to settled claim coordinates.
 
-### 3.5 Registration-Time Usernames
+### 3.5 Storage-Backed Usernames
 
 Accounts may hold at most one active username.
 
 - A username is a globally unique human-readable handle layered on top of canonical `owner_address` identity.
-- Usernames are assigned only by `STORAGE_CLAIM` during first paid storage activation, after required claimant sweep confirms effective active storage is zero.
-- While an account has effective active storage, its username reservation remains fixed.
+- Usernames are created by `USERNAME_CREATE` once the account has active raw storage grants and no active username.
+- Usernames are changed by `USERNAME_UPDATE` while the account still has active raw storage grants.
+- Raw storage grants MAY exist while the account has no active username.
+- Quota-bearing storage use is gated on an active username; if the account has no active username, usable quota is zero.
 - When required sweep reconciles an account to zero effective active storage, the username reservation is released.
 
 Canonical username form:
@@ -360,7 +382,7 @@ apply_block(σ, B, R) → σ':
 
 `ExecutionPayload` is the canonical execution input. Verifiers MUST execute the exact `account_messages` and `project_messages` order carried in `R`. `Block.chunks[*].txns[*].user_messages` redundantly mirror the finalized per-project message groups for persisted verification, sync, and indexing; account-message order is carried only by `ExecutionPayload.account_messages`. Each `project_id` MUST appear at most once in `ExecutionPayload.project_messages`; duplicate entries make the payload invalid. If the block's mirrored per-project messages differ from `ExecutionPayload.project_messages`, the block is invalid.
 
-**Account messages** (Phase 1, serial): `STORAGE_CLAIM`, `SIGNER_ADD`, `SIGNER_REMOVE`, `ACCOUNT_DATA`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `PROJECT_CREATE`, `PROJECT_REMOVE`, `FORK`.
+**Account messages** (Phase 1, serial): `STORAGE_CLAIM`, `SIGNER_ADD`, `SIGNER_REMOVE`, `ACCOUNT_DATA`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `USERNAME_CREATE`, `USERNAME_UPDATE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `PROJECT_CREATE`, `PROJECT_REMOVE`, `FORK`.
 
 `PROJECT_CREATE`, `PROJECT_REMOVE`, and `FORK` are classified as account messages because they modify `project_count` on the account.
 
@@ -387,7 +409,9 @@ Dropped messages are excluded from the committed block but do not halt execution
 | `REF_DELETE` | CAS+nonce | deletes `ref(project_id, ref_name)` |
 | `COLLABORATOR_ADD` | 2P add | `collaborator(project_id, target_owner_address)`, optionally clears `tombstone(collaborator(...))` |
 | `COLLABORATOR_REMOVE` | 2P remove | deletes `collaborator(project_id, target_owner_address)`, `tombstone(collaborator(...))` |
-| `STORAGE_CLAIM` | Settlement-verified authenticated user message | `storage_grant(owner_address, expires_at, claim_id)`, `storage_claim_marker(claim_id)`, `account(owner_address)` [`storage_units`, `username` on first activation], optionally `username_index(username)` on first activation |
+| `STORAGE_CLAIM` | Settlement-verified storage-funding message | `storage_grant(owner_address, expires_at, claim_id)`, `storage_claim_marker(claim_id)`, `account(owner_address)` [`storage_units`] |
+| `USERNAME_CREATE` | 1P State transition | `account(owner_address)` [`username`], `username_index(username)` |
+| `USERNAME_UPDATE` | 1P State transition | `account(owner_address)` [`username`], deletes old `username_index(current)`, writes `username_index(next)` |
 | `SIGNER_ADD` | Custody-auth | `key(owner_address, pubkey)`, `key_reverse(pubkey)`, `account(owner_address)` [custody_nonce++, key_count++] |
 | `SIGNER_REMOVE` | Custody-auth | deletes `key(owner_address, pubkey)`, `key_reverse(pubkey)`, `account(owner_address)` [custody_nonce++, key_count--] |
 | `VERIFICATION_ADD` | 2P add | `verification(owner_address, addr)`, `counter(owner_address, 0x03)`, optionally clears tombstone |
@@ -399,7 +423,7 @@ Dropped messages are excluded from the committed block but do not halt execution
 
 Key names reference Section 6.1 prefixes. 2P add/remove handlers also interact with prune markers (`0x15`) during quota pruning (Section 11.4). `MessageType::None` returns `Err`.
 
-`STORAGE_CLAIM` remains a Phase 1 account message. Validators execute username-bearing claims in the ordinary serial account-message order, so earlier successful claims may sweep a conflicting indexed owner before later claims are evaluated. Later conflicting claims in the same block are dropped as ordinary invalid account messages; they do not invalidate the whole block.
+`STORAGE_CLAIM`, `USERNAME_CREATE`, and `USERNAME_UPDATE` remain Phase 1 account messages. Validators execute them in the ordinary serial account-message order, so an earlier successful `STORAGE_CLAIM` may enable a later `USERNAME_CREATE` in the same block, and an earlier `USERNAME_UPDATE` may free a username before a later same-block claim attempts to take it. Later conflicting messages are dropped as ordinary invalid account messages; they do not invalidate the whole block.
 
 **Project identity and 2P set semantics.** Although `PROJECT_CREATE` and `PROJECT_REMOVE` are listed as 2P Set add/remove pairs, projects do not follow the generic `apply_2p_add` re-add path from Section 4.4.2. This is a consequence of content-addressed identity: `project_id = H(MessageData)` (Section 2.5), so every fresh `PROJECT_CREATE` message produces a unique `project_id`. There is no way to construct a new `PROJECT_CREATE` that targets an existing project's identity. A `PROJECT_CREATE` whose derived `project_id` matches an existing project entry MUST be rejected regardless of the project's current status. `PROJECT_ARCHIVE` is a terminal state transition — archived projects cannot be reverted to `Active`, but they can be forked or subsequently removed.
 
@@ -424,7 +448,7 @@ timestamp_valid(M, block_timestamp) → bool:
 
 All arithmetic MUST use saturating subtraction (clamping to 0 on underflow) since timestamps are unsigned integers.
 
-Storage-sensitive types (types that create or remove quota-affecting state): `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `STORAGE_CLAIM`.
+Storage-sensitive types (types that create or remove quota-affecting state): `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `USERNAME_CREATE`, `USERNAME_UPDATE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `STORAGE_CLAIM`.
 
 ### 4.4 Conflict Resolution
 
@@ -592,15 +616,16 @@ V2 has no generic unsigned system-message path.
 All committed V2 block messages are user-submitted envelope-bearing messages. The only bypass rules are:
 
 - `SIGNER_ADD` and `SIGNER_REMOVE` bypass delegated-key lookup; authority derives exclusively from valid custody signatures verified against `owner_address`.
+- `STORAGE_CLAIM` bypasses delegated-key lookup; authority derives exclusively from finalized settlement verification plus claim-marker idempotence.
 
 Disabled relay-era families (`KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, `RELAY_SIGNER_REMOVE`) are invalid in V2 and MUST be rejected at all external ingress points and during replay.
 
 ### 5.4A `STORAGE_CLAIM` Authorization
 
-`STORAGE_CLAIM` is no longer a delegated-key-bypass transport-only exception in reset deployments that include registration-time usernames.
+`STORAGE_CLAIM` is the settlement-verified raw storage-funding ingress.
 
 ```
-authorize_storage_claim(σ, data, signer, body) → FirstApply | DuplicateReplay | Err:
+authorize_storage_claim(σ, data, body) → FirstApply | DuplicateReplay | Err:
   require finalized settlement verification succeeds and matches
           (owner_address, actor, units)
 
@@ -611,11 +636,22 @@ authorize_storage_claim(σ, data, signer, body) → FirstApply | DuplicateReplay
   if storage_claim_marker(claim_id) exists:
     return DuplicateReplay
 
-  check_key_scope(σ, data.owner_address, signer, SIGNING)
   return FirstApply
 ```
 
-Under the existing scope ordering, `OWNER` and `SIGNING` satisfy the `STORAGE_CLAIM` requirement and `AGENT` does not. Duplicate replay remains settlement-first and marker-idempotent: once the claim marker exists, current delegated-key state MUST NOT cause a settlement-valid duplicate claim to fail.
+Duplicate replay remains settlement-first and marker-idempotent: once the claim marker exists, no later delegated-key state can affect the replay outcome because no delegated-key lookup is performed.
+
+### 5.4B Username Message Authorization
+
+`USERNAME_CREATE` and `USERNAME_UPDATE` are authenticated delegated-key account messages.
+
+```
+authorize_username_message(σ, data, signer) → Ok | Err:
+  check_key_scope(σ, data.owner_address, signer, SIGNING)
+  return Ok
+```
+
+Under the existing scope ordering, `OWNER` and `SIGNING` satisfy the username-message requirement and `AGENT` does not.
 
 ### 5.5 Custody-Authorized Message Authorization
 
@@ -825,7 +861,25 @@ The public compound-proof allowlist is limited to active keys under prefixes `0x
 
 Proofs over username-index keys prove persisted state only. Inclusion or exclusion of `[0x08 | username]` does not by itself prove effective current ownership or availability under lazy expiry, because reclaimability remains sweep-dependent.
 
-**Storage quota proof:** Authenticates the complete active storage-grant suffix for an `owner_address` at an explicit `as_of_unix_time` against the current root. A grant is **active** at time `T` if and only if `expires_at > T`. Because the storage grant key layout (Section 6.1, prefix `0x16`) embeds `expires_at` in big-endian immediately after `owner_address`, all grants for a given account are sorted by expiration time in ascending order, enabling efficient range-based proof construction. It is not a historical-state proof — it proves quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
+**Storage quota proof:** Authenticates the complete active storage-grant suffix for an `owner_address` at an explicit `as_of_unix_time` against the current root, authenticates the account row used to derive username-gated usable quota, and, when raw active grants are positive and the account row carries a username, authenticates the matching username-index row. A grant is **active** at time `T` if and only if `expires_at > T`. Because the storage grant key layout (Section 6.1, prefix `0x16`) embeds `expires_at` in big-endian immediately after `owner_address`, all grants for a given account are sorted by expiration time in ascending order, enabling efficient range-based proof construction. It is not a historical-state proof — it proves raw active grants and quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
+
+`GetStorageQuotaProofResponse` MUST additionally carry:
+
+- `account_value` — the encoded `AccountState` for `account(owner_address)`
+- `account_proof` — an operation proof authenticating `account(owner_address)` at `root`
+- `username_proof` — empty iff `AccountState.username == null` or `storage_units == 0`; otherwise an operation proof authenticating `[0x08 | username] -> owner_address` at `root`
+- `usable_storage_units` — the quota-bearing storage units derived from raw grants plus username activation
+
+Quota-proof verification is:
+
+1. verify `lower_bound_proof`, every grant proof, and `upper_bound_proof` against `root`
+2. derive raw `storage_units` from the proven grant set with `expires_at > as_of_unix_time`
+3. verify `account_proof` authenticates `account(owner_address)` with `account_value` at `root`
+4. decode `account_value` as `AccountState`
+5. if `AccountState.username == null`, require `username_proof` empty and derive `usable_storage_units = 0`
+6. if `AccountState.username != null` and `storage_units == 0`, require `username_proof` empty and derive `usable_storage_units = 0`
+7. if `AccountState.username != null` and `storage_units > 0`, require `username_proof` authenticates `[0x08 | username] -> owner_address` at `root` and derive `usable_storage_units = storage_units`
+8. require all returned `max_*` fields match the canonical limits derived from `usable_storage_units`
 
 ### 6.4 Merkle State
 
@@ -866,7 +920,9 @@ These checks require no state lookups and MUST be performed before any state acc
 | `SIGNER_ADD` | `key`: 32 bytes; valid scope; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 3; `custody_block_hash`: exactly 32 bytes iff `custody_key_type = 3`; `request_owner_address`: 20 bytes; request sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `request_key_type` ≤ 3; `request_block_hash`: exactly 32 bytes iff `request_key_type = 3`; `allowed_projects`: max 100 entries, each 32 bytes (agent scope only) |
 | `SIGNER_REMOVE` | `key`: 32 bytes; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 3; `custody_block_hash`: exactly 32 bytes iff `custody_key_type = 3` |
 | `REACTION_ADD/REMOVE` | `type ≠ NONE`; `target_project_id`: 32 bytes; `target_commit_hash`: 32 bytes |
-| `STORAGE_CLAIM` | `owner_address`: 20 bytes; `actor`: 20 bytes; `units > 0`; `settlement_tx_hash`: 32 bytes; `settlement_chain_id = host_chain_id(network)`; if `username` is non-empty it MUST already be canonical lowercase ASCII and match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
+| `STORAGE_CLAIM` | `owner_address`: 20 bytes; `actor`: 20 bytes; `units > 0`; `settlement_tx_hash`: 32 bytes; `settlement_chain_id = host_chain_id(network)` |
+| `USERNAME_CREATE` | `username` MUST already be canonical lowercase ASCII and match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
+| `USERNAME_UPDATE` | `username` MUST already be canonical lowercase ASCII and match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
 
 ### 7.2 State Validation (Stateful)
 
@@ -875,16 +931,20 @@ These checks require state lookups:
 - **`REF_UPDATE`:** `nonce` is 1 (new ref) or `current_nonce + 1` (update); `old_hash` matches current when set; `new_hash` references known commit; fast-forward within `MAX_FF_DEPTH` unless `force`.
 - **`COMMIT_BUNDLE`:** Each commit's parents are known or earlier in the same bundle. If `(project_id, commit_hash)` already exists, the message MUST NOT overwrite stored metadata; duplicate submissions are idempotent no-ops.
 - **`COLLABORATOR_ADD`:** Signer has ADMIN+ on project; target address is valid. Only the project's canonical owner (`project.owner_address`) MAY grant OWNER-level access. Only the canonical owner MAY modify or remove a collaborator who currently holds OWNER permission. ADMIN-scoped signers MAY grant at most ADMIN permission.
-- **`FORK`:** `source_commit_hash` exists. If the source project is private, the signer is the owner or a collaborator with at least `READ` permission.
+- **`FORK`:** `source_commit_hash` exists. If the source project is private, the signer is the owner or a collaborator with at least `READ` permission. The account has available usable storage capacity for the forked project.
 - **`PROJECT_REMOVE`:** Signer must be the project's canonical owner (`project.owner_address == data.owner_address`).
 - **`PROJECT_ARCHIVE`:** Signer must be the project's canonical owner (`project.owner_address == data.owner_address`).
-- **`PROJECT_CREATE`:** Account has available storage capacity; name is unique within owner's namespace.
+- **`PROJECT_CREATE`:** Account has available usable storage capacity; name is unique within owner's namespace.
 - **`VERIFICATION_ADD`:** `claim_signature` is valid for the given address, type, and network. For `ETH_ADDRESS`, `VerificationAddBody.chain_id` MUST equal the minimal unsigned big-endian encoding of `host_chain_id(MessageData.network)`. For `SOL_ADDRESS`, `VerificationAddBody.chain_id` MUST be empty. If `claim_key_type = 3`, verification MUST use ERC-1271 on `host_chain_id(MessageData.network)` pinned to `claim_block_hash`.
 - **`LINK_ADD`:** FOLLOW target must be a valid `owner_address`; STAR target must exist and not be removed.
 - **`SIGNER_ADD/REMOVE`:** See Section 5.5. `SIGNER_ADD` MUST also satisfy the app-attribution checks in Section 5.6. If `custody_key_type = 3` or `request_key_type = 3`, the referenced block hash MUST identify a finalized canonical Tempo block on `host_chain_id(MessageData.network)`.
 - **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
-- **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op. Otherwise delegated-key authorization with required scope `SIGNING` MUST pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp` before computing pre-claim effective active storage, and the claimant account snapshot used for username checks and final writeback MUST be loaded after that sweep. If pre-claim effective active storage is greater than zero, `username` MUST be empty. If pre-claim effective active storage is zero, `username` MUST be present and canonical, and the claimant account snapshot MUST NOT already carry an active username. If the username index already points to the same owner, the claim MUST be rejected because first-activation username assignment is no longer applicable. If the username index points to another owner, validators MUST sweep that owner at the same timestamp; if the conflicting owner remains storage-active, the claim MUST be rejected as username-taken, otherwise the stale reservation MUST be pruned before uniqueness is re-checked.
+- **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op. Otherwise claimant expired storage grants MUST be swept at `MessageData.timestamp`, the raw storage grant MUST be added, and cached `AccountState.storage_units` MUST be refreshed. `STORAGE_CLAIM` does not assign or update usernames.
+- **`USERNAME_CREATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must not already have an active username. The requested username must be available after mandatory stale-reservation reclamation.
+- **`USERNAME_UPDATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must already have an active username. The current username index entry MUST authenticate `[0x08 | current_username] -> owner_address`, otherwise execution MUST fail closed. The requested username must differ from the current username and must be available after mandatory stale-reservation reclamation.
+
+For MIP 4 deployments, quota-bearing add and remove mutations are both gated on usable storage. Accordingly, an account without an active username cannot execute `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, or `REACTION_REMOVE` through username-gated quota paths.
 
 ---
 
@@ -1107,27 +1167,27 @@ A **follower node** is a non-validator node that tracks the chain by streaming f
 
 ### 11.1 Effective Limits
 
-Limits scale with active rented storage units:
+Quota-bearing limits scale with `usable_storage_units`, where `usable_storage_units = active_storage_units` only when the account has an active username and `0` otherwise.
 
 | Resource | Effective Limit |
 |----------|-----------------|
-| Projects per account | `10 + storage_units × 10` |
+| Projects per account | `usable_storage_units × 10` |
 | Commit metadata per project | 10,000 |
 | Refs per project | 200 |
-| Collaborators per project | `50 + storage_units × 50` |
+| Collaborators per project | `usable_storage_units × 50` |
 | Keys per account | 1,000 |
-| Verifications per account | `50 + storage_units × 50` |
-| Links per account | `5,000 + storage_units × 5,000` |
-| Reactions per account | `10,000 + storage_units × 10,000` |
+| Verifications per account | `usable_storage_units × 50` |
+| Links per account | `usable_storage_units × 5,000` |
+| Reactions per account | `usable_storage_units × 10,000` |
 | Commits per bundle | 1,000 |
 
 ### 11.2 Storage Grant Expiry
 
-Each `STORAGE_CLAIM` creates a storage grant that expires at `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` (395 days). Expiry is enforced lazily on mutation paths that consume or free quota: when an account is touched by a quota-enforcing state transition, expired grants are swept, active units recomputed, usernames are released if effective active storage reaches zero, and pruning re-run if capacity dropped.
+Each `STORAGE_CLAIM` creates a storage grant that expires at `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` (395 days). Expiry is enforced lazily on mutation paths that consume or free quota: when an account is touched by a quota-enforcing state transition, expired grants are swept, raw active units are recomputed, usernames are released if effective active storage reaches zero, and pruning re-run if usable capacity dropped.
 
 Non-quota project-level operations (`REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `PROJECT_METADATA`, `PROJECT_ARCHIVE`) do NOT trigger storage-grant sweeps. Quota-enforcing paths such as `PROJECT_CREATE`, `FORK`, and collaborator/link/verification/reaction mutations MUST sweep before enforcement.
 
-Read-only queries MAY derive effective quota from currently active grants without mutating persisted state. Account responses MUST use the same effective read model for usernames: return the canonical username only when effective active storage is nonzero, and otherwise return the empty string even if a stale persisted username has not yet been swept.
+Read-only queries MAY derive effective quota from currently active grants without mutating persisted state. Account responses MUST expose raw active grants as `storage_units`, MUST derive `max_*` quota fields from usable quota, MUST return zero `max_*` fields whenever the account lacks an active username, and MUST return the canonical username only when the account has both active storage and an active username.
 
 `ACCOUNT_DATA(DISPLAY_NAME)` remains mutable profile metadata. It is distinct from canonical username because display names are not globally unique, not storage-backed, not released on storage expiry, and continue to follow LWW metadata semantics rather than registration semantics.
 
@@ -1266,7 +1326,7 @@ The canonical wire format for all protocol messages is [Protocol Buffers v3][pro
 
 ### B.1 Canonical Encoding Rules
 
-The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. For `2026.4.2`, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
+The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. For `2026.4.3`, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
 
 The reference encoding follows these rules:
 
@@ -1363,14 +1423,17 @@ At any effective swept state, no two distinct owners simultaneously hold the sam
 ### INV-13: Username Index Consistency
 For every owner with `AccountState.username = u`, the username index entry `[0x08 | u] -> owner_address` MUST exist, and for every username index entry `[0x08 | u] -> owner_address`, the corresponding account's `AccountState.username` MUST be `u` after required sweep reconciliation.
 
-### INV-14: Storage-Coupled Username Lifetime
-After required sweep at time `t`, if `active_storage_units(owner, t) > 0` the owner has exactly one active username; if `active_storage_units(owner, t) = 0` the owner has no active username.
+### INV-14: Storage-Backed Username Lifetime
+After required sweep at time `t`, if `active_storage_units(owner, t) = 0` the owner has no active username. If the owner has an active username after required reconciliation, then `active_storage_units(owner, t) > 0`.
 
-### INV-15: Duplicate Claim Replay Independence from Mutable Key State
-Once a `claim_id` is persisted under prefix `0x17`, any later settlement-valid `STORAGE_CLAIM` for the same settlement coordinates is a no-op regardless of current delegated-key state.
+### INV-15: Duplicate Claim Replay Independence from Delegated-Key State
+Once a `claim_id` is persisted under prefix `0x17`, any later settlement-valid `STORAGE_CLAIM` for the same settlement coordinates is a no-op and no delegated-key state is consulted.
 
 ### INV-16: Canonical Username Persistence
 All persisted username state MUST use the canonical normalized lowercase ASCII form in both `AccountState.username` and username-index key suffixes.
+
+### INV-17: Username-Gated Usable Quota
+If an owner lacks an active username after required reconciliation at time `t`, then `usable_storage_units(owner, t) = 0` and all username-gated `max_*` quota fields derived from usable storage are zero.
 
 ## Appendix E: Genesis State
 
@@ -1390,6 +1453,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.4.3 | 2026-04-16 | Split username lifecycle from `STORAGE_CLAIM`: restore settlement-only `STORAGE_CLAIM` funding semantics, add explicit `USERNAME_CREATE` and `USERNAME_UPDATE` control surfaces, make quota depend on username-gated usable storage instead of raw grants, remove free-tier write capacity, and update proofs, validation, and invariants accordingly. |
 | 2026.4.2 | 2026-04-14 | Fold MIP 4 registration-time usernames into the clean-slate reset baseline: add canonical username semantics to `STORAGE_CLAIM`, define the `0x08` username index, extend `AccountState` and account reads with `username`, require sweep-time username release and stale-reservation reclamation, and expose username keys on the public operation/exclusion proof surface without adding new RPCs. |
 | 2026.4.1 | 2026-04-10 | Align the canonical specification with MIP 3 clean-slate semantics: use a single reset-network rule set with fixed block/execution payload version `5`, complete ERC-1271 and address-derivation rules, clarify duplicate `STORAGE_CLAIM` idempotence and claim-id construction, tighten message and network validation, and make state-value encoding fully normative. |
 | 2026.4.0 | 2026-04-05 | Replace canonical relay payload commitment with canonical `ExecutionPayload`, require version `5`, remove `relay_checkpoint` from canonical block and payload encoding, and require persisted `(Block, ExecutionPayload)` verification. |

@@ -47,6 +47,8 @@ message MessageData {
     VerificationAddBody    verification_add    = 70;
     VerificationRemoveBody verification_remove = 71;
     StorageClaimBody       storage_claim       = 72;
+    UsernameCreateBody     username_create     = 73;
+    UsernameUpdateBody     username_update     = 74;
 
     LinkAddBody            link_add            = 90;
     LinkRemoveBody         link_remove         = 91;
@@ -86,6 +88,8 @@ enum MessageType {
   reserved 70;  // OWNERSHIP_TRANSFER
   reserved 71;  // STORAGE_RENT
   MESSAGE_TYPE_STORAGE_CLAIM       = 72;
+  MESSAGE_TYPE_USERNAME_CREATE     = 73;
+  MESSAGE_TYPE_USERNAME_UPDATE     = 74;
 
   reserved 16;  // RELAY_SIGNER_ADD
   reserved 17;  // RELAY_SIGNER_REMOVE
@@ -268,6 +272,14 @@ message StorageClaimBody {
   uint64 settlement_chain_id = 3;   // Host-chain EIP-155 chain id
   uint32 settlement_log_index = 4;  // Receipt-local log index
   bytes actor = 5;                  // 20-byte EVM address that paid or credited the settlement
+}
+
+message UsernameCreateBody {
+  string username = 1;              // Canonical lowercase username for first registration
+}
+
+message UsernameUpdateBody {
+  string username = 1;              // Canonical lowercase replacement username
 }
 
 // ============================================================
@@ -793,7 +805,7 @@ message GetAccountResponse {
   string bio = 4;
   string website = 5;
   repeated KeyEntry keys = 6;
-  uint32 storage_units = 7;  // Currently active rented storage units (free-tier capacity is reflected in max_* fields)
+  uint32 storage_units = 7;  // Raw active storage grants; max_* fields reflect username-gated usable quota
   uint32 project_count = 8;
   repeated VerificationEntry verifications = 9;
   bytes owner_address = 10;  // 20-byte EVM wallet address (empty if not yet set)
@@ -805,6 +817,7 @@ message GetAccountResponse {
   uint32 max_verifications = 16;
   uint32 max_reactions = 17;
   uint32 max_collaborators_per_project = 18;
+  string username = 19;       // Canonical active username (empty when no active username)
 }
 
 message KeyEntry {
@@ -1292,6 +1305,10 @@ message GetStorageQuotaProofResponse {
   bytes owner_address = 13;          // 20 bytes
   bytes upper_bound_key = 14;
   bytes upper_bound_proof = 15;
+  bytes account_value = 16;          // Encoded AccountState for account(owner_address)
+  bytes account_proof = 17;          // Operation proof authenticating account(owner_address) at root
+  bytes username_proof = 18;         // Empty iff username is null or storage_units == 0; otherwise operation proof for [0x08 | username]
+  uint32 usable_storage_units = 19;  // Username-gated usable quota derived from storage_units plus authenticated username state
 }
 
 message GetCompoundProofRequest {
