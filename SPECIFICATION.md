@@ -8,7 +8,7 @@
 
 A specialized protocol built for making things.
 
-**Version:** 2026.5.1
+**Version:** 2026.5.2
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every committed message is verifiable from canonical state and, where applicable, finalized message-local external evidence.
 
@@ -912,7 +912,7 @@ These checks require state lookups:
 - **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
 - **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op.
-- **`MERGE_REQUEST_ADD`:** Target project exists and is `Active`; source project exists and is not `Removed`; `source_project_id != project_id`; the source project's retained `0x1A` fork-parent chain reaches the target within `MAX_FORK_LINEAGE_DEPTH = 256`; private-target and private-source access checks pass; `source_ref` exists in the source project and resolves exactly to `source_commit_hash`; the referenced source commit exists; after expired-grant sweeping and pending-add reservation, the requester remains within the global active-entry merge-request limit and the target project remains within its merge-request namespace ceiling.
+- **`MERGE_REQUEST_ADD`:** Target project exists and is `Active`; source project exists and is not `Removed`; `source_project_id != project_id`; the source project's retained `0x1A` fork-parent chain reaches the target within `MAX_FORK_LINEAGE_DEPTH = 256`; private-target and private-source access checks pass; `source_ref` exists in the source project and resolves exactly to `source_commit_hash`; the referenced source commit exists; after expired-grant sweeping and pending-add reservation, the requester remains within the global active-entry merge-request limit, the requester remains within the requester-per-target active-entry cap derived from the target owner's storage units, and the target project remains within its merge-request namespace ceiling.
 - **`MERGE_REQUEST_REMOVE`:** An active merge request exists at `(project_id, request_id)`; if the remover is the original requester, closure remains valid even if the target project has become `Removed`, provided the active merge-request row still exists; otherwise the target project exists and is not `Removed`; either requester withdrawal or target-project `WRITE+` maintainer closure authorization succeeds; source project status is not checked.
 
 ---
@@ -1161,6 +1161,7 @@ Limits scale with active rented storage units:
 | Refs per project | 200 |
 | Collaborators per project | `50 + storage_units × 50` |
 | Merge requests per requester (global, active entries only) | `20 + storage_units × 20` |
+| Merge requests per requester per target project (active entries only) | `max_merge_requests_per_project(storage_units) / 2` |
 | Merge requests per target project (active + tombstones, namespace ceiling) | `20 + storage_units × 20` |
 | Keys per account | 1,000 |
 | Verifications per account | `50 + storage_units × 50` |
@@ -1172,7 +1173,7 @@ Limits scale with active rented storage units:
 
 Each `STORAGE_CLAIM` creates a storage grant that expires at `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` (395 days). Expiry is enforced lazily on mutation paths that consume or free quota: when an account is touched by a quota-enforcing state transition, expired grants are swept, active units recomputed, and pruning re-run if capacity dropped.
 
-Non-quota project-level operations (`REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `PROJECT_METADATA`, `PROJECT_ARCHIVE`) do NOT trigger storage-grant sweeps. Quota-enforcing paths such as `PROJECT_CREATE`, `FORK`, collaborator/link/verification/reaction mutations, and `MERGE_REQUEST_ADD` MUST sweep before enforcement. `MERGE_REQUEST_ADD` is special: it sweeps both the requester's account (for the global active-entry limit) and the target project's owner (for the target-project namespace ceiling).
+Non-quota project-level operations (`REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `PROJECT_METADATA`, `PROJECT_ARCHIVE`) do NOT trigger storage-grant sweeps. Quota-enforcing paths such as `PROJECT_CREATE`, `FORK`, collaborator/link/verification/reaction mutations, and `MERGE_REQUEST_ADD` MUST sweep before enforcement. `MERGE_REQUEST_ADD` is special: it sweeps both the requester's account (for the global active-entry limit) and the target project's owner (for the requester-per-target cap and the target-project namespace ceiling).
 
 Read-only queries MAY derive effective quota from currently active grants without mutating persisted state.
 
@@ -1209,12 +1210,13 @@ prune_commits(σ, project_id, max_commits):
 
 For links, verifications, reactions, and collaborators, quota accounting includes active entries plus tombstones. When a scoped family exceeds its effective limit, oldest entries are pruned first, ordered by entry timestamp ascending and then by active-key lexicographic order. A prune marker stores the pruned entry's timestamp and acts as a pseudo-tombstone during later add resolution.
 
-Merge requests use a two-layer model:
+Merge requests use a three-check admission model:
 
 - **Requester global active-entry quota:** Each requester is limited to `20 + storage_units × 20` active merge requests across all target projects. This layer counts only active entries discovered via the reverse index under prefix `0x1C` and is enforced by reject-on-exceed. No cross-project pruning occurs.
+- **Requester-per-target active-entry cap:** For any single target project, one requester is limited to `max_merge_requests_per_project(storage_units) / 2` active merge requests against that project. This layer counts only active entries discovered via the reverse-index prefix `[0x1C | requester_owner_address | project_id]` and is enforced by reject-on-exceed. No project-local pruning occurs here.
 - **Target-project namespace ceiling:** Each target project is limited to `20 + storage_units × 20` total merge-request namespace entries (active entries plus tombstones). This layer is enforced by project-local oldest-first pruning under prefix `0x1B` and its tombstones under `[0x03 | 0x1B | project_id | ...]`.
 
-For merge requests, Layer 1 MUST be enforced before Layer 2. An active-entry prune under Layer 2 MUST delete the matching reverse row and decrement `project.merge_request_count`. This model eliminates target-owner-budget griefing while preserving a bounded target-project namespace.
+For merge requests, the global requester quota and the requester-per-target cap MUST both be enforced before the target-project namespace ceiling. An active-entry prune under the target-project namespace ceiling MUST delete the matching reverse row and decrement `project.merge_request_count`. This model prevents a single requester from monopolizing a target project's merge-request namespace while preserving a bounded target-project namespace.
 
 ---
 
@@ -1474,6 +1476,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
 | 2026.5.1 | 2026-04-16 | Amend MIP 5 merge-request quota semantics to use a requester-global active-entry limit plus a target-project namespace ceiling, and allow requester withdrawal of active merge requests from removed target projects while the active row still exists. |
 | 2026.5.0 | 2026-04-15 | Canonically integrate MIP 5 merge requests: add `MERGE_REQUEST_ADD` / `MERGE_REQUEST_REMOVE`, retained fork-lineage rows, merge-request quota and proof surfaces, dual close authorization, public merge-request queries, and merge-request correctness invariants. |
 | 2026.4.1 | 2026-04-10 | Align the canonical specification with MIP 3 clean-slate semantics: keep `Genesis` as the reset-network baseline hardfork, complete ERC-1271 and address-derivation rules, clarify duplicate `STORAGE_CLAIM` idempotence and claim-id construction, tighten message and network validation, and make state-value encoding fully normative. |
