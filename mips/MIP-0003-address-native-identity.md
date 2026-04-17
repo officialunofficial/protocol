@@ -2,9 +2,9 @@
 mip: 3
 title: Address-Native Identity and Removal of MID
 description: Replaces MID with owner_address as the sole canonical account identifier, removing onchain registration and relay-injected identity messages.
-author: marthendalnunes
+author: marthendalnunes <vitor@unofficial.run>
 discussions-to: https://github.com/officialunofficial/protocol/discussions/18
-status: Draft
+status: Devnet
 type: Standards Track
 created: 2026-04-03
 requires: null
