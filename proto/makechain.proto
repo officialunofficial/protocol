@@ -12,21 +12,13 @@ message Message {
   bytes signature        = 3;  // Ed25519 signature over hash, 64 bytes
   bytes signer           = 4;  // Ed25519 public key, 32 bytes
   optional bytes data_bytes = 5;  // Cached canonical encoding of MessageData (used by verify_message)
-  reserved 6;  // legacy signer_key_type, not used in V2
 }
 
 message MessageData {
   MessageType type    = 1;
-  reserved 2;              // was mid
   uint32 timestamp    = 3;  // Makechain epoch seconds
   Network network     = 4;
   bytes owner_address = 5;  // 20-byte owner address
-
-  reserved 60;  // was key_add
-  reserved 80;  // was ownership_transfer
-  reserved 81;  // was storage_rent
-  reserved 96;  // was relay_signer_add
-  reserved 97;  // was relay_signer_remove
 
   oneof body {
     ProjectCreateBody      project_create      = 10;
@@ -78,17 +70,10 @@ enum MessageType {
   MESSAGE_TYPE_COLLABORATOR_REMOVE = 31;
   MESSAGE_TYPE_ACCOUNT_DATA        = 40;
 
-  reserved 50;  // KEY_ADD
-
   MESSAGE_TYPE_VERIFICATION_ADD    = 60;
   MESSAGE_TYPE_VERIFICATION_REMOVE = 61;
 
-  reserved 70;  // OWNERSHIP_TRANSFER
-  reserved 71;  // STORAGE_RENT
   MESSAGE_TYPE_STORAGE_CLAIM       = 72;
-
-  reserved 16;  // RELAY_SIGNER_ADD
-  reserved 17;  // RELAY_SIGNER_REMOVE
 
   MESSAGE_TYPE_LINK_ADD            = 80;
   MESSAGE_TYPE_LINK_REMOVE         = 81;
@@ -135,7 +120,6 @@ enum Visibility {
 message ForkBody {
   bytes source_project_id  = 1;  // 32 bytes
   string name              = 2;
-  reserved 3;                    // Was state_proof
   bytes source_commit_hash = 4;  // Target hash: the commit being forked from, 32 bytes
   Visibility visibility    = 5;  // Visibility of forked project (default: PUBLIC)
   // forked project_id = Message.hash of this FORK message
@@ -187,7 +171,6 @@ message CommitMeta {
   bytes hash             = 1;  // BLAKE3 of full commit object, 32 bytes
   repeated bytes parents = 2;  // Parent commit hashes
   bytes tree_root        = 3;  // BLAKE3 of tree object
-  reserved 4;                  // was author_mid
   uint32 author_timestamp = 5;
   string title           = 6;  // First line of commit message, max 200 chars
   bytes message_hash     = 7;  // BLAKE3 of full commit message
@@ -234,14 +217,12 @@ message RefDeleteBody {
 
 message CollaboratorAddBody {
   bytes project_id         = 1;  // 32 bytes
-  reserved 2;                    // was target_mid
   Permission permission    = 3;
   bytes target_owner_address = 4; // 20-byte owner address
 }
 
 message CollaboratorRemoveBody {
   bytes project_id         = 1;  // 32 bytes
-  reserved 2;                    // was target_mid
   bytes target_owner_address = 3; // 20-byte owner address
 }
 
@@ -299,7 +280,6 @@ enum VerificationType {
 
 message LinkAddBody {
   LinkType link_type          = 1;
-  reserved 2;                    // was target_mid
   oneof target {
     bytes target_project_id   = 3;  // For STAR (account → project), 32 bytes
     bytes target_owner_address = 4; // For FOLLOW (account → account), 20-byte owner address
@@ -308,7 +288,6 @@ message LinkAddBody {
 
 message LinkRemoveBody {
   LinkType link_type          = 1;
-  reserved 2;                    // was target_mid
   oneof target {
     bytes target_project_id   = 3;
     bytes target_owner_address = 4;
@@ -354,16 +333,13 @@ message SignerAddBody {
   bytes key = 1;                        // Ed25519 public key, 32 bytes
   uint32 scope = 2;                     // KeyScope: 0 = Owner, 1 = Signing, 2 = Agent
   bytes custody_signature = 3;          // EIP-712 signature: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
-  reserved 4;                           // Was deadline
   repeated bytes allowed_projects = 5;  // Agent scope: project IDs (32 bytes each)
   uint32 custody_key_type = 6;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271
   uint64 nonce = 7;                     // Must match account custody_nonce (replay protection)
-  reserved 8;                           // was request_mid
   bytes request_signature = 9;         // EIP-712 SignerRequest sig from app's owner_address: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
   uint32 request_key_type = 10;        // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271
   uint64 valid_after = 11;             // Earliest unix timestamp accepted for this authorization
   uint64 valid_before = 12;            // Latest unix timestamp accepted for this authorization
-  reserved 13;                         // legacy key_type, not used in V2
   bytes request_owner_address = 14;    // 20-byte owner address of requesting app when known
   bytes custody_block_hash = 15;       // Required iff custody_key_type == 3, exactly 32 bytes
   bytes request_block_hash = 16;       // Required iff request_key_type == 3, exactly 32 bytes
@@ -373,7 +349,6 @@ message SignerRemoveBody {
   bytes key = 1;                        // Ed25519 public key to remove, 32 bytes
   bytes custody_signature = 2;          // EIP-712 signature: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
   uint32 custody_key_type = 4;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271
-  reserved 3;                           // Was deadline
   uint64 nonce = 5;                     // Must match account custody_nonce (replay protection)
   uint64 valid_after = 6;               // Earliest unix timestamp accepted for this authorization
   uint64 valid_before = 7;              // Latest unix timestamp accepted for this authorization
@@ -639,7 +614,6 @@ message BatchSubmitResponse {
 
 message GetProjectRequest {
   bytes project_id = 1;  // 32 bytes
-  uint64 caller_mid = 2 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
 }
 
 message GetProjectResponse {
@@ -648,7 +622,6 @@ message GetProjectResponse {
   string description = 3;
   string license = 4;
   Visibility visibility = 5;
-  reserved 6;             // was owner_mid
   string status = 7;     // "active", "archived", "removed"
   bytes fork_source = 8; // Source project_id if forked, empty otherwise
   uint32 ref_count = 9;
@@ -661,18 +634,14 @@ message GetProjectResponse {
 }
 
 message GetProjectByNameRequest {
-  reserved 1;               // was owner_mid
   string name = 2;          // Project name
-  uint64 caller_mid = 3 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
   bytes owner_address = 4;  // 20-byte owner address
 }
 
 message SearchProjectsRequest {
   string query = 1;         // Name prefix search
-  reserved 2;               // was owner_mid
   uint32 limit = 3;         // Max results (default 50)
   bytes cursor = 4;         // Opaque pagination cursor from previous response
-  uint64 caller_mid = 5 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
   bytes owner_address = 6;  // 20-byte owner address filter
 }
 
@@ -680,7 +649,6 @@ message GetProjectActivityRequest {
   bytes project_id = 1;     // 32 bytes
   uint32 limit = 2;          // Max messages (default 50)
   repeated MessageType types = 3;  // Filter by type (empty = all)
-  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
 }
 
 message GetProjectActivityResponse {
@@ -688,10 +656,8 @@ message GetProjectActivityResponse {
 }
 
 message ListProjectsRequest {
-  reserved 1;               // was owner_mid
   uint32 limit = 2;
   bytes cursor = 3;         // Opaque pagination cursor
-  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
   bytes owner_address = 5;  // 20-byte owner address filter
 }
 
@@ -705,7 +671,6 @@ message ListProjectsResponse {
 message GetRefRequest {
   bytes project_id = 1;
   bytes ref_name = 2;
-  uint64 caller_mid = 3 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
 }
 
 message GetRefResponse {
@@ -720,7 +685,6 @@ message ListRefsRequest {
   bytes project_id = 1;
   uint32 limit = 2;
   bytes cursor = 3;
-  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
 }
 
 message ListRefsResponse {
@@ -733,7 +697,6 @@ message ListRefsResponse {
 message GetCommitRequest {
   bytes project_id = 1;
   bytes commit_hash = 2;    // 32 bytes
-  uint64 caller_mid = 3 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
 }
 
 message GetCommitResponse {
@@ -747,7 +710,6 @@ message ListCommitsRequest {
   bytes project_id = 1;
   uint32 limit = 2;
   bytes cursor = 3;
-  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
 }
 
 message ListCommitsResponse {
@@ -761,11 +723,9 @@ message ListCollaboratorsRequest {
   bytes project_id = 1;
   uint32 limit = 2;
   bytes cursor = 3;
-  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
 }
 
 message CollaboratorEntry {
-  reserved 1;               // was mid
   Permission permission = 2;
   bytes owner_address = 3;  // 20-byte owner address
 }
@@ -778,7 +738,6 @@ message ListCollaboratorsResponse {
 // --- Account ---
 
 message GetAccountRequest {
-  reserved 1;               // was mid
   bytes owner_address = 2;  // 20-byte owner address
 }
 
@@ -787,7 +746,6 @@ message GetAccountByKeyRequest {
 }
 
 message GetAccountResponse {
-  reserved 1;               // was mid
   string display_name = 2;
   string avatar = 3;
   string bio = 4;
@@ -813,13 +771,10 @@ message KeyEntry {
   bytes key = 1;
   KeyScope scope = 2;
   repeated bytes allowed_projects = 3;
-  reserved 4;                          // was request_mid
-  reserved 5;                          // legacy key_type, not used in V2
   bytes request_owner_address = 6;     // 20-byte owner address of requesting app when known
 }
 
 message GetKeyRequest {
-  reserved 1;               // was mid
   bytes key = 2;   // Ed25519 public key, 32 bytes
   bytes owner_address = 3;  // 20-byte owner address
 }
@@ -829,13 +784,10 @@ message GetKeyResponse {
   KeyScope scope = 2;
   repeated bytes allowed_projects = 3;
   uint32 added_at = 4;
-  reserved 5;                          // was request_mid
-  reserved 6;                          // legacy key_type, not used in V2
   bytes request_owner_address = 7;     // 20-byte owner address of requesting app when known
 }
 
 message ListKeysRequest {
-  reserved 1;               // was mid
   uint32 limit = 2;
   bytes cursor = 3;     // public key to start after (for pagination)
   bytes owner_address = 4;  // 20-byte owner address
@@ -847,7 +799,6 @@ message ListKeysResponse {
 }
 
 message GetAccountActivityRequest {
-  reserved 1;               // was mid
   uint32 limit = 2;          // Max messages (default 50)
   repeated MessageType types = 3;  // Filter by type (empty = all)
   bytes owner_address = 4;   // 20-byte owner address
@@ -972,7 +923,6 @@ message GetChainStatsResponse {
 // --- Verifications ---
 
 message ListVerificationsRequest {
-  reserved 1;               // was mid
   uint32 limit = 2;
   bytes cursor = 3;
   bytes owner_address = 4;   // 20-byte owner address
@@ -994,7 +944,6 @@ message ListVerificationsResponse {
 // --- Links ---
 
 message ListLinksRequest {
-  reserved 1;               // was mid
   LinkType link_type = 2;   // Filter by type (NONE = all)
   uint32 limit = 3;
   bytes cursor = 4;
@@ -1003,7 +952,6 @@ message ListLinksRequest {
 
 message LinkEntry {
   LinkType link_type = 1;
-  reserved 2;                      // was target_mid
   bytes target_project_id = 3;     // Set for STAR links, 32 bytes
   uint32 added_at = 4;             // Consensus timestamp when the link was created
   bytes target_owner_address = 5;  // Set for FOLLOW links when known
@@ -1017,7 +965,6 @@ message ListLinksResponse {
 
 message ListLinksByTargetRequest {
   LinkType link_type = 1;          // Required: FOLLOW or STAR
-  reserved 2;                      // was target_mid
   oneof target {
     bytes target_project_id = 3;   // For STAR: which project is starred
   }
@@ -1034,7 +981,6 @@ message ListLinksByTargetResponse {
 // --- Reactions ---
 
 message ListReactionsRequest {
-  reserved 1;                        // was mid
   ReactionType reaction_type = 2;    // Filter by type (NONE = all)
   bytes target_project_id = 3;       // Filter by project (empty = all)
   uint32 limit = 4;
@@ -1046,7 +992,6 @@ message ReactionEntry {
   ReactionType reaction_type = 1;
   bytes target_project_id = 2;       // 32 bytes
   bytes target_commit_hash = 3;      // 32 bytes
-  reserved 4;                        // was source_mid
   uint32 added_at = 5;               // Consensus timestamp
   bytes source_owner_address = 6;    // 20-byte owner address when known
 }
@@ -1103,13 +1048,11 @@ message GetRefLogRequest {
   bytes project_id = 1;
   bytes ref_name = 2;
   uint32 limit = 3;
-  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
 }
 
 message RefLogEntry {
   bytes old_hash = 1;
   bytes new_hash = 2;
-  reserved 3;                 // was mid
   uint32 timestamp = 4;
   uint64 block_number = 5;
   bool force = 6;
@@ -1151,7 +1094,6 @@ message GetCommitAncestorsRequest {
   bytes project_id = 1;
   bytes commit_hash = 2;     // Start commit (walk backwards from here)
   uint32 limit = 3;          // Max commits to return (default 50)
-  uint64 caller_mid = 4 [deprecated = true]; // DEPRECATED: was unauthenticated visibility check, now ignored
 }
 
 message GetCommitAncestorsResponse {
@@ -1269,7 +1211,6 @@ message VerifyExclusionProofAtBlockResponse {
 }
 
 message GetStorageQuotaProofRequest {
-  reserved 1;                    // was mid
   uint32 as_of_unix_time = 2;  // Evaluate quota against the current root at this explicit time. Future values are rejected.
   bytes owner_address = 3;     // 20 bytes
 }
@@ -1281,7 +1222,6 @@ message StorageGrantProofEntry {
 }
 
 message GetStorageQuotaProofResponse {
-  reserved 1;                    // was mid
   uint32 as_of_unix_time = 2;
   bytes root = 3;                    // 32-byte canonical current QMDB root all returned proofs were generated against
   bytes lower_bound_key = 4;         // Raw key immediately before the active suffix: [storage_grant_prefix(owner_address) | as_of_unix_time+1] in canonical V2 semantics

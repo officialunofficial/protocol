@@ -4,7 +4,7 @@ title: Merge Requests for Cross-Project Contribution Proposals
 description: Adds a protocol-level merge request primitive enabling permissionless contribution proposals from fork descendants to upstream projects.
 author: marthendalnunes
 discussions-to: https://github.com/officialunofficial/protocol/discussions/15
-status: Draft
+status: Devnet
 type: Standards Track
 created: 2026-04-13
 requires: MIP-0003
