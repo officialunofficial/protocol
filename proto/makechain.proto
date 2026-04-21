@@ -25,9 +25,6 @@ message MessageData {
   reserved 60;  // was key_add
   reserved 80;  // was ownership_transfer
   reserved 81;  // was storage_rent
-  reserved 96;  // was relay_signer_add
-  reserved 97;  // was relay_signer_remove
-
   oneof body {
     ProjectCreateBody      project_create      = 10;
     ProjectMetadataBody    project_metadata    = 11;
@@ -57,6 +54,9 @@ message MessageData {
 
     SignerAddBody          signer_add          = 94;
     SignerRemoveBody       signer_remove       = 95;
+
+    MergeRequestAddBody    merge_request_add    = 96;
+    MergeRequestRemoveBody merge_request_remove = 97;
   }
 }
 
@@ -98,6 +98,8 @@ enum MessageType {
   MESSAGE_TYPE_LINK_REMOVE         = 81;
   MESSAGE_TYPE_REACTION_ADD        = 82;
   MESSAGE_TYPE_REACTION_REMOVE     = 83;
+  MESSAGE_TYPE_MERGE_REQUEST_ADD   = 84;
+  MESSAGE_TYPE_MERGE_REQUEST_REMOVE = 85;
 }
 
 enum Network {
@@ -355,6 +357,24 @@ enum ReactionType {
 }
 
 // ============================================================
+// 2P: MERGE REQUEST SET — Cross-project contribution proposals
+// ============================================================
+
+message MergeRequestAddBody {
+  bytes project_id         = 1;  // target project_id, 32 bytes
+  bytes source_project_id  = 2;  // source fork-descendant project_id, 32 bytes
+  bytes source_ref         = 3;  // 1-254 bytes, no 0x00
+  bytes source_commit_hash = 4;  // 32 bytes
+  bytes target_ref         = 5;  // 1-254 bytes, no 0x00
+  string title             = 6;  // 1-200 UTF-8 bytes
+}
+
+message MergeRequestRemoveBody {
+  bytes project_id = 1;  // target project_id, 32 bytes
+  bytes request_id = 2;  // original MERGE_REQUEST_ADD Message.hash, 32 bytes
+}
+
+// ============================================================
 // 2P: SIGNER SET — Self-authenticating key operations
 //
 // These are submitted directly by clients.
@@ -566,6 +586,11 @@ service MakechainService {
   rpc ListReactions(ListReactionsRequest) returns (ListReactionsResponse);
   rpc ListReactionsByTarget(ListReactionsByTargetRequest) returns (ListReactionsByTargetResponse);
 
+  // Read path — merge requests
+  rpc GetMergeRequest(GetMergeRequestRequest) returns (GetMergeRequestResponse);
+  rpc ListMergeRequests(ListMergeRequestsRequest) returns (ListMergeRequestsResponse);
+  rpc ListMergeRequestsByRequester(ListMergeRequestsByRequesterRequest) returns (ListMergeRequestsByRequesterResponse);
+
   // Read path — blocks
   rpc GetBlock(GetBlockRequest) returns (GetBlockResponse);
   rpc ListBlocks(ListBlocksRequest) returns (ListBlocksResponse);
@@ -670,6 +695,7 @@ message GetProjectResponse {
   uint32 max_collaborators = 13;  // Per-project collaborator limit
   uint32 max_commits = 14;        // Per-project commit limit (before pruning)
   bytes owner_address = 15;       // 20-byte owner address when known
+  uint32 merge_request_count = 16;
 }
 
 message GetProjectByNameRequest {
@@ -817,7 +843,9 @@ message GetAccountResponse {
   uint32 max_verifications = 16;
   uint32 max_reactions = 17;
   uint32 max_collaborators_per_project = 18;
-  string username = 19;       // Canonical active username (empty when no active username)
+  uint32 max_merge_requests_per_requester = 19;
+  uint32 max_merge_requests_per_project = 20;
+  string username = 21;       // Canonical active username (empty when no active username)
 }
 
 message KeyEntry {
@@ -1080,6 +1108,52 @@ message ListReactionsByTargetResponse {
   bytes next_cursor = 2;
 }
 
+// --- Merge Requests ---
+
+message GetMergeRequestRequest {
+  bytes project_id = 1;  // 32 bytes
+  bytes request_id = 2;  // 32 bytes
+}
+
+message GetMergeRequestResponse {
+  MergeRequestSummary merge_request = 1;
+}
+
+message ListMergeRequestsRequest {
+  bytes project_id = 1;               // 32 bytes
+  uint32 limit = 2;
+  bytes cursor = 3;                   // opaque forward-key cursor
+  bytes requester_owner_address = 4;  // optional 20-byte filter
+}
+
+message ListMergeRequestsResponse {
+  repeated MergeRequestSummary merge_requests = 1;
+  bytes next_cursor = 2;
+}
+
+message ListMergeRequestsByRequesterRequest {
+  bytes owner_address = 1;  // 20 bytes
+  uint32 limit = 2;
+  bytes cursor = 3;         // opaque reverse-key cursor
+}
+
+message ListMergeRequestsByRequesterResponse {
+  repeated MergeRequestSummary merge_requests = 1;
+  bytes next_cursor = 2;
+}
+
+message MergeRequestSummary {
+  bytes request_id = 1;
+  bytes project_id = 2;
+  bytes requester_owner_address = 3;
+  bytes source_project_id = 4;
+  bytes source_ref = 5;
+  bytes source_commit_hash = 6;
+  bytes target_ref = 7;
+  string title = 8;
+  uint32 added_at = 9;
+}
+
 // --- Streaming ---
 
 message SubscribeRequest {
@@ -1187,11 +1261,13 @@ message SyncFetchRequest {
   uint64 op_count = 1;        // Total operation count at target (from GetSyncTarget.range_end)
   uint64 start_location = 2;  // Start location to fetch from
   uint64 max_operations = 3;  // Max operations per batch
+  bool include_pinned_nodes = 4;
 }
 
 message SyncFetchResponse {
   bytes proof = 1;             // Encoded MMR Proof<Blake3Digest> (commonware-codec)
   repeated bytes operations = 2; // Each operation encoded via commonware-codec
+  repeated bytes pinned_nodes = 3; // Blake3 digests required to verify the lower boundary when requested
 }
 
 // --- Block Sync ---
@@ -1305,10 +1381,12 @@ message GetStorageQuotaProofResponse {
   bytes owner_address = 13;          // 20 bytes
   bytes upper_bound_key = 14;
   bytes upper_bound_proof = 15;
-  bytes account_value = 16;          // Encoded AccountState for account(owner_address)
-  bytes account_proof = 17;          // Operation proof authenticating account(owner_address) at root
-  bytes username_proof = 18;         // Empty iff username is null or storage_units == 0; otherwise operation proof for [0x08 | username]
-  uint32 usable_storage_units = 19;  // Username-gated usable quota derived from storage_units plus authenticated username state
+  uint32 max_merge_requests_per_project = 16;
+  uint32 max_merge_requests_per_requester = 17;
+  bytes account_value = 18;          // Encoded AccountState for account(owner_address)
+  bytes account_proof = 19;          // Operation proof authenticating account(owner_address) at root
+  bytes username_proof = 20;         // Empty iff username is null or storage_units == 0; otherwise operation proof for [0x08 | username]
+  uint32 usable_storage_units = 21;  // Username-gated usable quota derived from storage_units plus authenticated username state
 }
 
 message GetCompoundProofRequest {
