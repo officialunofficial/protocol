@@ -104,7 +104,7 @@ Throughout this document, "MUST", "MUST NOT", "SHOULD", and "MAY" follow [RFC 21
 
 ### 2.1 Message Envelope
 
-Every message on the network is wrapped in a [`Message`](proto/makechain.proto#L9) envelope. The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](proto/makechain.proto).
+Every message on the network is wrapped in a [`Message`](../proto/makechain.proto) envelope. The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](../proto/makechain.proto).
 
 ```
 Message {
@@ -116,9 +116,9 @@ Message {
 }
 ```
 
-**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](proto/makechain.proto#L17). In this version, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
+**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](../proto/makechain.proto). For `2026.5.2`, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
 
-The `data_bytes` field (field 5 on [`Message`](proto/makechain.proto#L9)) caches `canonical_encode(data)` — the same bytes that were hashed. Verifiers re-encode `data` independently and reject the message if `data_bytes` does not match, then check the hash against the re-encoded bytes. `data_bytes` is never used as a hash input directly; it exists so intermediaries can forward the original encoding without re-serializing.
+The `data_bytes` field (field 5 on [`Message`](../proto/makechain.proto)) caches `canonical_encode(data)` — the same bytes that were hashed. Verifiers re-encode `data` independently and reject the message if `data_bytes` does not match, then check the hash against the re-encoded bytes. `data_bytes` is never used as a hash input directly; it exists so intermediaries can forward the original encoding without re-serializing.
 
 **Authenticated user messages** — `hash`, `signature`, and `signer` MUST all be present and valid:
 ```
@@ -130,9 +130,9 @@ scope(signer) ≤ required_scope(data.type)
 
 **Custody-authorized user messages** (`SIGNER_ADD`, `SIGNER_REMOVE`) — the Ed25519 envelope provides integrity, but authorization comes from an EIP-712 custody signature verified against the account's `owner_address`. These messages bypass the delegated-key registration lookup entirely.
 
-**Settlement-authorized user messages** (`STORAGE_CLAIM`) — the Ed25519 envelope provides integrity, but delegated-key lookup does not apply. Authority derives from successful finalized settlement verification.
+**Settlement-verified storage-funding messages** (`STORAGE_CLAIM`) — the Ed25519 envelope provides integrity, while authorization derives from finalized settlement verification against the claim coordinates and payload. If the claim marker already exists after successful settlement verification, execution is an idempotent no-op.
 
-For `STORAGE_CLAIM`, the envelope signer is transport-only: it MAY be any valid Ed25519 public key, MUST NOT be persisted merely because it signed the claim, and gains no authority from the envelope alone.
+For `STORAGE_CLAIM`, validators MUST first verify finalized settlement evidence against `owner_address`, `actor`, and `units`. If the claim marker already exists, execution is an idempotent no-op. First successful application does not require delegated-key authorization.
 
 ### 2.2 MessageData
 
@@ -147,6 +147,24 @@ MessageData {
 ```
 
 A valid `MessageData` MUST select exactly one body variant, that body MUST match `type`, and `MESSAGE_TYPE_NONE` is invalid for admitted, replayed, or committed messages.
+
+For MIP 4 deployments, the canonical protobuf additions are:
+
+```proto
+message MessageData {
+  oneof body {
+    StorageClaimBody storage_claim = 72;
+    UsernameCreateBody username_create = 73;
+    UsernameUpdateBody username_update = 74;
+  }
+}
+
+enum MessageType {
+  MESSAGE_TYPE_STORAGE_CLAIM = 72;
+  MESSAGE_TYPE_USERNAME_CREATE = 73;
+  MESSAGE_TYPE_USERNAME_UPDATE = 74;
+}
+```
 
 ### 2.3 Message Types
 
@@ -174,8 +192,8 @@ Every message type follows one of two paradigms:
 | Singleton | Irreversible creation | `FORK` |
 | LWW Register | Timestamp-based last-write-wins | `PROJECT_METADATA`, `ACCOUNT_DATA` |
 | Append-only | Monotonic growth, protocol-pruned | `COMMIT_BUNDLE` |
-| State transition | Terminal state change | `PROJECT_ARCHIVE` |
-| Settlement-backed | Authorization from finalized settlement evidence | `STORAGE_CLAIM` |
+| State transition | Deterministic preconditioned state rewrite | `PROJECT_ARCHIVE`, `USERNAME_CREATE`, `USERNAME_UPDATE` |
+| Settlement-verified storage-funding message | Finalized settlement verification and marker-idempotent replay | `STORAGE_CLAIM` |
 | Custody-authorized | Authorization from EIP-712 custody signature | `SIGNER_ADD`, `SIGNER_REMOVE` |
 
 **2P (two-phase)** — Add/Remove pairs operating on a set.
@@ -189,28 +207,30 @@ Every message type follows one of two paradigms:
 
 | Type | Enum Value | Paradigm | Required Scope | Body Proto |
 |------|-----------|----------|----------------|------------|
-| `PROJECT_CREATE` | 1 | 2P Set † | SIGNING | [`ProjectCreateBody`](proto/makechain.proto#L147) |
-| `PROJECT_METADATA` | 2 | 1P LWW | SIGNING + WRITE (`NAME`/`VISIBILITY` require ADMIN) | [`ProjectMetadataBody`](proto/makechain.proto#L181) |
-| `PROJECT_ARCHIVE` | 3 | 1P Transition | SIGNING | [`ProjectArchiveBody`](proto/makechain.proto#L233) |
-| `FORK` | 4 | 1P Singleton | SIGNING | [`ForkBody`](proto/makechain.proto#L168) |
-| `PROJECT_REMOVE` | 5 | 2P Set | SIGNING | [`ProjectRemoveBody`](proto/makechain.proto#L155) |
-| `REF_UPDATE` | 10 | 2P CAS | AGENT | [`RefUpdateBody`](proto/makechain.proto#L241) |
-| `REF_DELETE` | 11 | 2P CAS | AGENT | [`RefDeleteBody`](proto/makechain.proto#L256) |
-| `SIGNER_ADD` | 14 | Custody-auth | (custody sig) | [`SignerAddBody`](proto/makechain.proto#L397) |
-| `SIGNER_REMOVE` | 15 | Custody-auth | (custody sig) | [`SignerRemoveBody`](proto/makechain.proto#L412) |
-| `COMMIT_BUNDLE` | 20 | 1P Append | AGENT | [`CommitBundleBody`](proto/makechain.proto#L212) |
-| `COLLABORATOR_ADD` | 30 | 2P Set | SIGNING (ADMIN) | [`CollaboratorAddBody`](proto/makechain.proto#L267) |
-| `COLLABORATOR_REMOVE` | 31 | 2P Set | SIGNING (ADMIN) | [`CollaboratorRemoveBody`](proto/makechain.proto#L273) |
-| `ACCOUNT_DATA` | 40 | 1P LWW | SIGNING | [`AccountDataBody`](proto/makechain.proto#L195) |
-| `VERIFICATION_ADD` | 60 | 2P Set | SIGNING | [`VerificationAddBody`](proto/makechain.proto#L325) |
-| `VERIFICATION_REMOVE` | 61 | 2P Set | SIGNING | [`VerificationRemoveBody`](proto/makechain.proto#L332) |
-| `STORAGE_CLAIM` | 72 | Settlement-backed | (settlement proof) | [`StorageClaimBody`](proto/makechain.proto#L338) |
-| `LINK_ADD` | 80 | 2P Set | SIGNING | [`LinkAddBody`](proto/makechain.proto#L346) |
-| `LINK_REMOVE` | 81 | 2P Set | SIGNING | [`LinkRemoveBody`](proto/makechain.proto#L354) |
-| `REACTION_ADD` | 82 | 2P Set | SIGNING | [`ReactionAddBody`](proto/makechain.proto#L372) |
-| `REACTION_REMOVE` | 83 | 2P Set | SIGNING | [`ReactionRemoveBody`](proto/makechain.proto#L378) |
-| `MERGE_REQUEST_ADD` | 84 | 2P Set | SIGNING | [`MergeRequestAddBody`](proto/makechain.proto) |
-| `MERGE_REQUEST_REMOVE` | 85 | 2P Set | SIGNING | [`MergeRequestRemoveBody`](proto/makechain.proto) |
+| `PROJECT_CREATE` | 1 | 2P Set † | SIGNING | [`ProjectCreateBody`](../proto/makechain.proto) |
+| `PROJECT_METADATA` | 2 | 1P LWW | SIGNING + WRITE (`NAME`/`VISIBILITY` require ADMIN) | [`ProjectMetadataBody`](../proto/makechain.proto) |
+| `PROJECT_ARCHIVE` | 3 | 1P Transition | SIGNING | [`ProjectArchiveBody`](../proto/makechain.proto) |
+| `FORK` | 4 | 1P Singleton | SIGNING | [`ForkBody`](../proto/makechain.proto) |
+| `PROJECT_REMOVE` | 5 | 2P Set | SIGNING | [`ProjectRemoveBody`](../proto/makechain.proto) |
+| `REF_UPDATE` | 10 | 2P CAS | AGENT | [`RefUpdateBody`](../proto/makechain.proto) |
+| `REF_DELETE` | 11 | 2P CAS | AGENT | [`RefDeleteBody`](../proto/makechain.proto) |
+| `COMMIT_BUNDLE` | 20 | 1P Append | AGENT | [`CommitBundleBody`](../proto/makechain.proto) |
+| `COLLABORATOR_ADD` | 30 | 2P Set | SIGNING (ADMIN) | [`CollaboratorAddBody`](../proto/makechain.proto) |
+| `COLLABORATOR_REMOVE` | 31 | 2P Set | SIGNING (ADMIN) | [`CollaboratorRemoveBody`](../proto/makechain.proto) |
+| `ACCOUNT_DATA` | 40 | 1P LWW | SIGNING | [`AccountDataBody`](../proto/makechain.proto) |
+| `VERIFICATION_ADD` | 60 | 2P Set | SIGNING | [`VerificationAddBody`](../proto/makechain.proto) |
+| `VERIFICATION_REMOVE` | 61 | 2P Set | SIGNING | [`VerificationRemoveBody`](../proto/makechain.proto) |
+| `STORAGE_CLAIM` | 72 | Settlement-verified storage-funding message | none; duplicate replay short-circuits after settlement verification | [`StorageClaimBody`](../proto/makechain.proto) |
+| `USERNAME_CREATE` | 73 | 1P State transition | SIGNING | [`UsernameCreateBody`](../proto/makechain.proto) |
+| `USERNAME_UPDATE` | 74 | 1P State transition | SIGNING | [`UsernameUpdateBody`](../proto/makechain.proto) |
+| `LINK_ADD` | 80 | 2P Set | SIGNING | [`LinkAddBody`](../proto/makechain.proto) |
+| `LINK_REMOVE` | 81 | 2P Set | SIGNING | [`LinkRemoveBody`](../proto/makechain.proto) |
+| `REACTION_ADD` | 82 | 2P Set | SIGNING | [`ReactionAddBody`](../proto/makechain.proto) |
+| `REACTION_REMOVE` | 83 | 2P Set | SIGNING | [`ReactionRemoveBody`](../proto/makechain.proto) |
+| `SIGNER_ADD` | 14 | Custody-auth | (custody sig) | [`SignerAddBody`](../proto/makechain.proto) |
+| `SIGNER_REMOVE` | 15 | Custody-auth | (custody sig) | [`SignerRemoveBody`](../proto/makechain.proto) |
+| `MERGE_REQUEST_ADD` | 84 | 2P Set | SIGNING | [`MergeRequestAddBody`](../proto/makechain.proto) |
+| `MERGE_REQUEST_REMOVE` | 85 | 2P Set | SIGNING | [`MergeRequestRemoveBody`](../proto/makechain.proto) |
 
 † `PROJECT_CREATE` is paired with `PROJECT_REMOVE` as a 2P Set, but does not follow the generic `apply_2p_add` re-add path because `project_id` is content-addressed (Section 2.5). See Section 4.2 for the specific semantics.
 
@@ -253,9 +273,10 @@ An account is identified by `owner_address` (`bytes(20)`). Each account's state 
 | `verifications` | 2P Set | External address ownership proofs. |
 | `links` | 2P Set | Follow/star relationships. |
 | `reactions` | 2P Set | Commit reactions. |
-| `storage_units` | `uint32` | Active storage capacity derived from unexpired storage grants. |
+| `storage_units` | `uint32` | Raw active storage grants derived from unexpired storage-grant rows. |
 | `project_count` | `uint32` | Number of owned projects. |
 | `key_count` | `uint32` | Number of registered delegated keys. |
+| `username` | `string \| null` | Canonical lowercase username when the account has completed username registration and still has active storage. |
 
 There is no onchain account allocation, transfer, or recovery flow in V2.
 
@@ -277,7 +298,33 @@ V2 has no relay-injected identity or signer-management messages.
 
 The only live delegated-key management flow is custody-authorized `SIGNER_ADD` / `SIGNER_REMOVE`, authorized directly against `owner_address`.
 
-The only Tempo-backed storage ingress is `STORAGE_CLAIM`, a user-submitted message whose authority derives from verified finalized settlement data rather than delegated-key lookup.
+The only Tempo-backed storage ingress is `STORAGE_CLAIM`, a settlement-verified user-submitted message that funds raw storage grants. Username control is handled separately by delegated-key-authorized `USERNAME_CREATE` and `USERNAME_UPDATE` messages. Duplicate replay remains anchored to settled claim coordinates.
+
+### 3.5 Storage-Backed Usernames
+
+Accounts may hold at most one active username.
+
+- A username is a globally unique human-readable handle layered on top of canonical `owner_address` identity.
+- Usernames are created by `USERNAME_CREATE` once the account has active raw storage grants and no active username.
+- Usernames are changed by `USERNAME_UPDATE` while the account still has active raw storage grants.
+- Raw storage grants MAY exist while the account has no active username.
+- Quota-bearing storage use is gated on an active username; if the account has no active username, usable quota is zero.
+- When required sweep reconciles an account to zero effective active storage, the username reservation is released.
+
+Canonical username form:
+
+- lowercase ASCII only
+- length `3` through `32` inclusive
+- allowed characters: `a-z`, `0-9`, `-`
+- first and last characters MUST be alphanumeric
+
+Canonical regex:
+
+```text
+^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$
+```
+
+Clients MAY accept mixed-case ASCII input for UX, but they MUST lowercase and validate it before signing or submission. Validators MUST reject non-canonical usernames on the wire rather than silently normalizing them during execution.
 
 ---
 
@@ -338,7 +385,7 @@ apply_block(σ, B, R) → σ':
 
 `ExecutionPayload` is the canonical execution input. Verifiers MUST execute the exact `account_messages` and `project_messages` order carried in `R`. `Block.chunks[*].txns[*].user_messages` redundantly mirror the finalized per-project message groups for persisted verification, sync, and indexing; account-message order is carried only by `ExecutionPayload.account_messages`. Each `project_id` MUST appear at most once in `ExecutionPayload.project_messages`; duplicate entries make the payload invalid. If the block's mirrored per-project messages differ from `ExecutionPayload.project_messages`, the block is invalid.
 
-**Account messages** (Phase 1, serial): `STORAGE_CLAIM`, `SIGNER_ADD`, `SIGNER_REMOVE`, `ACCOUNT_DATA`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `PROJECT_CREATE`, `PROJECT_REMOVE`, `FORK`.
+**Account messages** (Phase 1, serial): `STORAGE_CLAIM`, `SIGNER_ADD`, `SIGNER_REMOVE`, `ACCOUNT_DATA`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `USERNAME_CREATE`, `USERNAME_UPDATE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `PROJECT_CREATE`, `PROJECT_REMOVE`, `FORK`.
 
 `PROJECT_CREATE`, `PROJECT_REMOVE`, and `FORK` are classified as account messages because they modify `project_count` on the account.
 
@@ -365,7 +412,9 @@ Dropped messages are excluded from the committed block but do not halt execution
 | `REF_DELETE` | CAS+nonce | deletes `ref(project_id, ref_name)` |
 | `COLLABORATOR_ADD` | 2P add | `collaborator(project_id, target_owner_address)`, optionally clears `tombstone(collaborator(...))` |
 | `COLLABORATOR_REMOVE` | 2P remove | deletes `collaborator(project_id, target_owner_address)`, `tombstone(collaborator(...))` |
-| `STORAGE_CLAIM` | Settlement-backed | `storage_grant(owner_address, expires_at, claim_id)`, `storage_claim_marker(claim_id)`, `account(owner_address)` [storage_units] |
+| `STORAGE_CLAIM` | Settlement-verified storage-funding message | `storage_grant(owner_address, expires_at, claim_id)`, `storage_claim_marker(claim_id)`, `account(owner_address)` [`storage_units`] |
+| `USERNAME_CREATE` | 1P State transition | `account(owner_address)` [`username`], `username_index(username)` |
+| `USERNAME_UPDATE` | 1P State transition | `account(owner_address)` [`username`], deletes old `username_index(current)`, writes `username_index(next)` |
 | `SIGNER_ADD` | Custody-auth | `key(owner_address, pubkey)`, `key_reverse(pubkey)`, `account(owner_address)` [custody_nonce++, key_count++] |
 | `SIGNER_REMOVE` | Custody-auth | deletes `key(owner_address, pubkey)`, `key_reverse(pubkey)`, `account(owner_address)` [custody_nonce++, key_count--] |
 | `VERIFICATION_ADD` | 2P add | `verification(owner_address, addr)`, `counter(owner_address, 0x03)`, optionally clears tombstone |
@@ -378,6 +427,8 @@ Dropped messages are excluded from the committed block but do not halt execution
 | `MERGE_REQUEST_REMOVE` | 2P remove | deletes `merge_request(...)`, deletes `merge_request_reverse(...)`, `tombstone(merge_request(...))`, `project(project_id)` [merge_request_count--] |
 
 Key names reference Section 6.1 prefixes. 2P add/remove handlers also interact with prune markers (`0x15`) during quota pruning (Section 11.4). `MessageType::None` returns `Err`.
+
+`STORAGE_CLAIM`, `USERNAME_CREATE`, and `USERNAME_UPDATE` remain Phase 1 account messages. Validators execute them in the ordinary serial account-message order, so an earlier successful `STORAGE_CLAIM` may enable a later `USERNAME_CREATE` in the same block, and an earlier `USERNAME_UPDATE` may free a username before a later same-block claim attempts to take it. Later conflicting messages are dropped as ordinary invalid account messages; they do not invalidate the whole block.
 
 **Project identity and 2P set semantics.** Although `PROJECT_CREATE` and `PROJECT_REMOVE` are listed as 2P Set add/remove pairs, projects do not follow the generic `apply_2p_add` re-add path from Section 4.4.2. This is a consequence of content-addressed identity: `project_id = H(MessageData)` (Section 2.5), so every fresh `PROJECT_CREATE` message produces a unique `project_id`. There is no way to construct a new `PROJECT_CREATE` that targets an existing project's identity. A `PROJECT_CREATE` whose derived `project_id` matches an existing project entry MUST be rejected regardless of the project's current status. `PROJECT_ARCHIVE` is a terminal state transition — archived projects cannot be reverted to `Active`, but they can be forked or subsequently removed.
 
@@ -402,7 +453,7 @@ timestamp_valid(M, block_timestamp) → bool:
 
 All arithmetic MUST use saturating subtraction (clamping to 0 on underflow) since timestamps are unsigned integers.
 
-Storage-sensitive types (types that create or remove quota-affecting state): `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `STORAGE_CLAIM`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`.
+Storage-sensitive types (types that create or remove quota-affecting state): `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `USERNAME_CREATE`, `USERNAME_UPDATE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `STORAGE_CLAIM`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`.
 
 ### 4.4 Conflict Resolution
 
@@ -569,10 +620,43 @@ V2 has no generic unsigned system-message path.
 
 All committed V2 block messages are user-submitted envelope-bearing messages. The only bypass rules are:
 
-- `STORAGE_CLAIM` bypasses delegated-key lookup; authority derives exclusively from successful finalized settlement verification.
 - `SIGNER_ADD` and `SIGNER_REMOVE` bypass delegated-key lookup; authority derives exclusively from valid custody signatures verified against `owner_address`.
+- `STORAGE_CLAIM` bypasses delegated-key lookup; authority derives exclusively from finalized settlement verification plus claim-marker idempotence.
 
 Disabled relay-era families (`KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, `RELAY_SIGNER_REMOVE`) are invalid in V2 and MUST be rejected at all external ingress points and during replay.
+
+### 5.4A `STORAGE_CLAIM` Authorization
+
+`STORAGE_CLAIM` is the settlement-verified raw storage-funding ingress.
+
+```
+authorize_storage_claim(σ, data, body) → FirstApply | DuplicateReplay | Err:
+  require finalized settlement verification succeeds and matches
+          (owner_address, actor, units)
+
+  let claim_id = storage_claim_id(body.settlement_chain_id,
+                                  body.settlement_tx_hash,
+                                  body.settlement_log_index)
+
+  if storage_claim_marker(claim_id) exists:
+    return DuplicateReplay
+
+  return FirstApply
+```
+
+Duplicate replay remains settlement-first and marker-idempotent: once the claim marker exists, no later delegated-key state can affect the replay outcome because no delegated-key lookup is performed.
+
+### 5.4B Username Message Authorization
+
+`USERNAME_CREATE` and `USERNAME_UPDATE` are authenticated delegated-key account messages.
+
+```
+authorize_username_message(σ, data, signer) → Ok | Err:
+  check_key_scope(σ, data.owner_address, signer, SIGNING)
+  return Ok
+```
+
+Under the existing scope ordering, `OWNER` and `SIGNING` satisfy the username-message requirement and `AGENT` does not.
 
 ### 5.5 Custody-Authorized Message Authorization
 
@@ -601,7 +685,7 @@ Current deployments:
 
 Unknown or unsupported network identifiers MUST fail closed for EIP-712 custody, app-attribution, and ETH verification-claim signing or verification.
 
-**`SignerAdd` type declaration** (mirrors [`SignerAddBody`](proto/makechain.proto#L397)):
+**`SignerAdd` type declaration** (mirrors [`SignerAddBody`](../proto/makechain.proto)):
 ```
 SignerAdd(address owner, bytes32 key, uint32 scope, uint64 validAfter,
           uint64 validBefore, uint64 nonce, bytes32[] allowedProjects, uint32 network)
@@ -614,7 +698,7 @@ SignerAddContract(address owner, bytes32 key, uint32 scope, uint64 validAfter,
                   uint32 network, bytes32 validationBlockHash)
 ```
 
-**`SignerRemove` type declaration** (mirrors [`SignerRemoveBody`](proto/makechain.proto#L412)):
+**`SignerRemove` type declaration** (mirrors [`SignerRemoveBody`](../proto/makechain.proto)):
 ```
 SignerRemove(address owner, bytes32 key, uint64 validAfter,
              uint64 validBefore, uint64 nonce, uint32 network)
@@ -636,10 +720,10 @@ SignerRemoveContract(address owner, bytes32 key, uint64 validAfter,
 | 2 | WebAuthn (P256) | Variable-length envelope | 107–2048 bytes |
 | 3 | ERC-1271 | Opaque contract-defined bytes plus companion `custody_block_hash` | 0–8192 bytes |
 
-- `valid_after` / `valid_before` bound [`MessageData.timestamp`](proto/makechain.proto#L20).
+- `valid_after` / `valid_before` bound [`MessageData.timestamp`](../proto/makechain.proto).
 - `nonce` MUST match the account's current `custody_nonce` for `owner_address`.
 - `allowedProjects` binds the key's project allowlist into the `SignerAdd` signature, preventing allowlist manipulation before finalization.
-- `network` binds the signature to [`MessageData.network`](proto/makechain.proto#L21), preventing cross-network replay.
+- `network` binds the signature to [`MessageData.network`](../proto/makechain.proto), preventing cross-network replay.
 - The EIP-712 domain `chainId` MUST equal `host_chain_id(data.network)`.
 - `custody_block_hash` MUST be present and exactly 32 bytes iff `custody_key_type = 3`, and MUST identify a finalized canonical Tempo block on `host_chain_id(data.network)`.
 
@@ -692,7 +776,7 @@ P256 and WebAuthn therefore share the same 20-byte address space for the same un
 
 ### 5.8 Visibility
 
-The [`Visibility`](proto/makechain.proto#L159) enum (`PUBLIC` / `PRIVATE`) is defined on [`ProjectCreateBody`](proto/makechain.proto#L147), [`ForkBody`](proto/makechain.proto#L168), and [`ProjectMetadataBody`](proto/makechain.proto#L181). In the current protocol version, visibility does not gate general read access to canonical project state, but it does constrain `FORK`: a private source project MAY be forked only by its owner or by a collaborator with at least `READ` permission. `PRIVATE` visibility is otherwise reserved for future access control extensions. Implementations MUST store and return the visibility value and MUST enforce the `FORK` access rule above.
+The [`Visibility`](../proto/makechain.proto) enum (`PUBLIC` / `PRIVATE`) is defined on [`ProjectCreateBody`](../proto/makechain.proto), [`ForkBody`](../proto/makechain.proto), and [`ProjectMetadataBody`](../proto/makechain.proto). In the current protocol version, visibility does not gate general read access to canonical project state, but it does constrain `FORK`: a private source project MAY be forked only by its owner or by a collaborator with at least `READ` permission. `PRIVATE` visibility is otherwise reserved for future access control extensions. Implementations MUST store and return the visibility value and MUST enforce the `FORK` access rule above.
 
 ### 5.9 Merge Request Authorization
 
@@ -771,7 +855,7 @@ State is stored in a merkleized key-value store with prefix-byte namespacing. Al
 | `0x05` | Account metadata | `[0x05 \| owner_address:20 \| field:1]` |
 | `0x06` | Key | `[0x06 \| owner_address:20 \| pubkey:32]` |
 | `0x07` | Key reverse index | `[0x07 \| pubkey:32] -> owner_address` |
-| `0x08` | Unused | Reserved / unused in canonical V2 schema |
+| `0x08` | Username index | `[0x08 \| username:*] -> owner_address` |
 | `0x09` | Verification | `[0x09 \| owner_address:20 \| address:*]` |
 | `0x0A` | Project | `[0x0A \| project_id:32]` |
 | `0x0B` | Project metadata | `[0x0B \| project_id:32 \| field:1]` |
@@ -793,7 +877,7 @@ State is stored in a merkleized key-value store with prefix-byte namespacing. Al
 | `0x1B` | Merge request (forward) | `[0x1B \| project_id:32 \| request_id:32]` |
 | `0x1C` | Merge request (reverse) | `[0x1C \| requester_owner_address:20 \| project_id:32 \| request_id:32]` |
 
-Prefixes `0x07`, `0x0C`, `0x11`, `0x13`, and `0x1C` are reverse indexes. Prefix `0x02` stores committed block data for persistence and replay. Prefix `0x03` stores 2P set tombstones — each tombstone key is `[0x03 | active_key]` mapping to the remove timestamp (`u32`), enabling durable remove-wins resolution. Prefix `0x16` stores the expiring storage grants that drive effective quota. Prefix `0x17` stores consumed storage-claim markers so settlement-backed claims are idempotent after restart or replay. Prefix `0x1A` stores retained immediate fork ancestry independently from prunable project rows so merge-request lineage validation remains stable across project cleanup.
+Prefix `0x08` stores the canonical lowercase username index used to enforce global uniqueness while storage-backed reservations remain active. Prefixes `0x07`, `0x0C`, `0x11`, `0x13`, and `0x1C` are reverse indexes. Prefix `0x02` stores committed block data for persistence and replay. Prefix `0x03` stores 2P set tombstones — each tombstone key is `[0x03 | active_key]` mapping to the remove timestamp (`u32`), enabling durable remove-wins resolution. Prefix `0x16` stores the expiring storage grants that drive effective quota. Prefix `0x17` stores consumed storage-claim markers so settlement-backed claims are idempotent after restart or replay. Prefix `0x1A` stores retained immediate fork ancestry independently from prunable project rows so merge-request lineage validation remains stable across project cleanup.
 
 **Counter types** for prefix `0x14`:
 
@@ -807,7 +891,7 @@ MIP 5 does not allocate a new per-account counter family for merge requests. Req
 
 **Merkleized prefixes:** exactly `0x03` through `0x17` inclusive, plus `0x1A`, `0x1B`, and `0x1C`. Prefix `0x02` (blocks) is persisted but non-merkleized. Prefixes `0x18` and `0x19` are non-merkleized operational state used for replay deduplication and crash recovery. Legacy `0x01` message-state storage is not part of the canonical V2 state schema or state root.
 
-**Index keys** (not direct protocol state, but merkleized): `0x07` (key reverse), `0x0C` (project name), `0x11` (link reverse), `0x13` (reaction reverse), `0x1C` (merge request reverse).
+**Index keys** (not direct protocol state, but merkleized): `0x07` (key reverse), `0x08` (username), `0x0C` (project name), `0x11` (link reverse), `0x13` (reaction reverse), `0x1C` (merge request reverse).
 
 `ProjectState` includes `merge_request_count: u32`, which MUST equal the number of active merge-request forward rows under `[0x1B | project_id]`. Implementations MUST maintain the counter across add, remove, and active-entry prune operations, and the field MUST be serialized even when its value is `0`.
 
@@ -825,7 +909,7 @@ This leaves 287 usable bytes. The maximum `ref_name` length is 254 bytes (prefix
 
 The state store supports three proof surfaces anchored to committed state roots:
 
-The public proof RPC surface for these queries is [`GetOperationProof`](proto/makechain.proto#L642), [`GetExclusionProof`](proto/makechain.proto#L643), [`VerifyOperationProof`](proto/makechain.proto#L644), [`VerifyExclusionProof`](proto/makechain.proto#L680), [`VerifyOperationProofAtBlock`](proto/makechain.proto), [`VerifyExclusionProofAtBlock`](proto/makechain.proto), [`GetStorageQuotaProof`](proto/makechain.proto#L645), and [`GetCompoundProof`](proto/makechain.proto).
+The public proof RPC surface for these queries is [`GetOperationProof`](../proto/makechain.proto), [`GetExclusionProof`](../proto/makechain.proto), [`VerifyOperationProof`](../proto/makechain.proto), [`VerifyExclusionProof`](../proto/makechain.proto), [`VerifyOperationProofAtBlock`](../proto/makechain.proto), [`VerifyExclusionProofAtBlock`](../proto/makechain.proto), [`GetStorageQuotaProof`](../proto/makechain.proto), and [`GetCompoundProof`](../proto/makechain.proto).
 
 - **Operation proof** — proves a key-value pair exists at a given root (Merkle inclusion path).
 - **Exclusion proof** — proves a key does NOT exist at a given root (neighboring key boundary).
@@ -841,6 +925,7 @@ The statement above describes the protocol-level proof model. The public proof a
 
 The public operation/exclusion proof allowlist is limited to:
 
+- username-index keys under prefix `0x08`, where the suffix is the canonical lowercase username bytes and satisfies the username grammar from Section 3.5
 - project-name index keys under prefix `0x0C`
 - collaborator keys under prefix `0x0F`
 - storage-grant keys under prefix `0x16`
@@ -850,7 +935,27 @@ The public compound-proof allowlist is limited to active keys under prefixes `0x
 
 Reverse merge-request rows under `0x1C` are not part of the public proof surface. Retained fork-lineage rows under `0x1A` are canonical state but are not part of the public proof surface.
 
-**Storage quota proof:** Authenticates the complete active storage-grant suffix for an `owner_address` at an explicit `as_of_unix_time` against the current root. A grant is **active** at time `T` if and only if `expires_at > T`. Because the storage grant key layout (Section 6.1, prefix `0x16`) embeds `expires_at` in big-endian immediately after `owner_address`, all grants for a given account are sorted by expiration time in ascending order, enabling efficient range-based proof construction. It is not a historical-state proof — it proves quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
+Proofs over username-index keys prove persisted state only. Inclusion or exclusion of `[0x08 | username]` does not by itself prove effective current ownership or availability under lazy expiry, because reclaimability remains sweep-dependent.
+
+**Storage quota proof:** Authenticates the complete active storage-grant suffix for an `owner_address` at an explicit `as_of_unix_time` against the current root, authenticates the account row used to derive username-gated usable quota, and, when raw active grants are positive and the account row carries a username, authenticates the matching username-index row. A grant is **active** at time `T` if and only if `expires_at > T`. Because the storage grant key layout (Section 6.1, prefix `0x16`) embeds `expires_at` in big-endian immediately after `owner_address`, all grants for a given account are sorted by expiration time in ascending order, enabling efficient range-based proof construction. It is not a historical-state proof — it proves raw active grants and quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
+
+`GetStorageQuotaProofResponse` MUST additionally carry:
+
+- `account_value` — the encoded `AccountState` for `account(owner_address)`
+- `account_proof` — an operation proof authenticating `account(owner_address)` at `root`
+- `username_proof` — empty iff `AccountState.username == null` or `storage_units == 0`; otherwise an operation proof authenticating `[0x08 | username] -> owner_address` at `root`
+- `usable_storage_units` — the quota-bearing storage units derived from raw grants plus username activation
+
+Quota-proof verification is:
+
+1. verify `lower_bound_proof`, every grant proof, and `upper_bound_proof` against `root`
+2. derive raw `storage_units` from the proven grant set with `expires_at > as_of_unix_time`
+3. verify `account_proof` authenticates `account(owner_address)` with `account_value` at `root`
+4. decode `account_value` as `AccountState`
+5. if `AccountState.username == null`, require `username_proof` empty and derive `usable_storage_units = 0`
+6. if `AccountState.username != null` and `storage_units == 0`, require `username_proof` empty and derive `usable_storage_units = 0`
+7. if `AccountState.username != null` and `storage_units > 0`, require `username_proof` authenticates `[0x08 | username] -> owner_address` at `root` and derive `usable_storage_units = storage_units`
+8. require all returned `max_*` fields match the canonical limits derived from `usable_storage_units`
 
 ### 6.4 Merkle State
 
@@ -892,6 +997,8 @@ These checks require no state lookups and MUST be performed before any state acc
 | `SIGNER_REMOVE` | `key`: 32 bytes; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 3; `custody_block_hash`: exactly 32 bytes iff `custody_key_type = 3` |
 | `REACTION_ADD/REMOVE` | `type ≠ NONE`; `target_project_id`: 32 bytes; `target_commit_hash`: 32 bytes |
 | `STORAGE_CLAIM` | `owner_address`: 20 bytes; `actor`: 20 bytes; `units > 0`; `settlement_tx_hash`: 32 bytes; `settlement_chain_id = host_chain_id(network)` |
+| `USERNAME_CREATE` | `username` MUST already be canonical lowercase ASCII and match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
+| `USERNAME_UPDATE` | `username` MUST already be canonical lowercase ASCII and match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
 | `MERGE_REQUEST_ADD` | `project_id`: 32 bytes; `source_project_id`: 32 bytes and not equal to `project_id`; `source_ref`: 1-254 bytes, no `0x00`; `source_commit_hash`: 32 bytes; `target_ref`: 1-254 bytes, no `0x00`; `title`: 1-200 bytes when UTF-8 encoded |
 | `MERGE_REQUEST_REMOVE` | `project_id`: 32 bytes; `request_id`: 32 bytes |
 
@@ -902,18 +1009,22 @@ These checks require state lookups:
 - **`REF_UPDATE`:** `nonce` is 1 (new ref) or `current_nonce + 1` (update); `old_hash` matches current when set; `new_hash` references known commit; fast-forward within `MAX_FF_DEPTH` unless `force`.
 - **`COMMIT_BUNDLE`:** Each commit's parents are known or earlier in the same bundle. If `(project_id, commit_hash)` already exists, the message MUST NOT overwrite stored metadata; duplicate submissions are idempotent no-ops.
 - **`COLLABORATOR_ADD`:** Signer has ADMIN+ on project; target address is valid. Only the project's canonical owner (`project.owner_address`) MAY grant OWNER-level access. Only the canonical owner MAY modify or remove a collaborator who currently holds OWNER permission. ADMIN-scoped signers MAY grant at most ADMIN permission.
-- **`FORK`:** `source_commit_hash` exists. If the source project is private, the signer is the owner or a collaborator with at least `READ` permission.
+- **`FORK`:** `source_commit_hash` exists. If the source project is private, the signer is the owner or a collaborator with at least `READ` permission. The account has available usable storage capacity for the forked project.
 - **`PROJECT_REMOVE`:** Signer must be the project's canonical owner (`project.owner_address == data.owner_address`).
 - **`PROJECT_ARCHIVE`:** Signer must be the project's canonical owner (`project.owner_address == data.owner_address`).
-- **`PROJECT_CREATE`:** Account has available storage capacity; name is unique within owner's namespace.
+- **`PROJECT_CREATE`:** Account has available usable storage capacity; name is unique within owner's namespace.
 - **`VERIFICATION_ADD`:** `claim_signature` is valid for the given address, type, and network. For `ETH_ADDRESS`, `VerificationAddBody.chain_id` MUST equal the minimal unsigned big-endian encoding of `host_chain_id(MessageData.network)`. For `SOL_ADDRESS`, `VerificationAddBody.chain_id` MUST be empty. If `claim_key_type = 3`, verification MUST use ERC-1271 on `host_chain_id(MessageData.network)` pinned to `claim_block_hash`.
 - **`LINK_ADD`:** FOLLOW target must be a valid `owner_address`; STAR target must exist and not be removed.
 - **`SIGNER_ADD/REMOVE`:** See Section 5.5. `SIGNER_ADD` MUST also satisfy the app-attribution checks in Section 5.6. If `custody_key_type = 3` or `request_key_type = 3`, the referenced block hash MUST identify a finalized canonical Tempo block on `host_chain_id(MessageData.network)`.
 - **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
-- **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op.
-- **`MERGE_REQUEST_ADD`:** Target project exists and is `Active`; source project exists and is not `Removed`; `source_project_id != project_id`; the source project's retained `0x1A` fork-parent chain reaches the target within `MAX_FORK_LINEAGE_DEPTH = 256`; private-target and private-source access checks pass; `source_ref` exists in the source project and resolves exactly to `source_commit_hash`; the referenced source commit exists; after expired-grant sweeping and pending-add reservation, the requester remains within the global active-entry merge-request limit, the requester remains within the requester-per-target active-entry cap derived from the target owner's storage units, and the target project remains within its merge-request namespace ceiling.
+- **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op. Otherwise claimant expired storage grants MUST be swept at `MessageData.timestamp`, the raw storage grant MUST be added, and cached `AccountState.storage_units` MUST be refreshed. `STORAGE_CLAIM` does not assign or update usernames.
+- **`USERNAME_CREATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must not already have an active username. The requested username must be available after mandatory stale-reservation reclamation.
+- **`USERNAME_UPDATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must already have an active username. The current username index entry MUST authenticate `[0x08 | current_username] -> owner_address`, otherwise execution MUST fail closed. The requested username must differ from the current username and must be available after mandatory stale-reservation reclamation.
+- **`MERGE_REQUEST_ADD`:** Target project exists and is `Active`; source project exists and is not `Removed`; `source_project_id != project_id`; the source project's retained `0x1A` fork-parent chain reaches the target within `MAX_FORK_LINEAGE_DEPTH = 256`; private-target and private-source access checks pass; `source_ref` exists in the source project and resolves exactly to `source_commit_hash`; the referenced source commit exists; after expired-grant sweeping and pending-add reservation, the requester remains within the global active-entry merge-request limit, the requester remains within the requester-per-target active-entry cap of `usable_storage_units × 10` derived from the target owner's usable storage units, and the target project remains within its merge-request namespace ceiling.
 - **`MERGE_REQUEST_REMOVE`:** An active merge request exists at `(project_id, request_id)`; if the remover is the original requester, closure remains valid even if the target project has become `Removed`, provided the active merge-request row still exists; otherwise the target project exists and is not `Removed`; either requester withdrawal or target-project `WRITE+` maintainer closure authorization succeeds; source project status is not checked.
+
+For MIP 4 deployments, quota-bearing add and remove mutations are both gated on usable storage. Accordingly, an account without an active username cannot execute `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `MERGE_REQUEST_ADD`, or `MERGE_REQUEST_REMOVE` through username-gated quota paths.
 
 ---
 
@@ -952,9 +1063,9 @@ BlockHeader {
 }
 ```
 
-The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](proto/makechain.proto). The corresponding protobuf messages are [`Block`](proto/makechain.proto), [`BlockHeader`](proto/makechain.proto), and [`ExecutionPayload`](proto/makechain.proto).
+The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](../proto/makechain.proto). The corresponding protobuf messages are [`Block`](../proto/makechain.proto), [`BlockHeader`](../proto/makechain.proto), and [`ExecutionPayload`](../proto/makechain.proto).
 
-`consensus_finalization` commits to the digest of the associated [`ExecutionPayload`](proto/makechain.proto), which is the canonical execution input:
+`consensus_finalization` commits to the digest of the associated [`ExecutionPayload`](../proto/makechain.proto), which is the canonical execution input:
 
 ```
 ExecutionPayload {
@@ -969,7 +1080,7 @@ ExecutionPayload {
 }
 ```
 
-The finalized block header authenticates the post-execution state root; the finalized payload authenticates the exact executed message sequence. `proposal_digest(R)` refers to the hash of the canonical [`ExecutionPayload`](proto/makechain.proto) encoding, not to the `digest` field inside `R`.
+The finalized block header authenticates the post-execution state root; the finalized payload authenticates the exact executed message sequence. `proposal_digest(R)` refers to the hash of the canonical [`ExecutionPayload`](../proto/makechain.proto) encoding, not to the `digest` field inside `R`.
 
 #### Proposal Digest Construction
 
@@ -986,13 +1097,13 @@ Where:
 - `len(wire)` is the byte length of the encoded protobuf, serialized as an 8-byte unsigned little-endian integer.
 - The domain separator `b"makechain:execution-payload:v1"` prevents cross-protocol hash collisions.
 
-The [`ProjectMessages`](proto/makechain.proto#L443) entries in `project_messages` MUST be ordered by byte-lexicographic `project_id`, matching the `BTreeMap` iteration order in the reference implementation.
+The [`ProjectMessages`](../proto/makechain.proto) entries in `project_messages` MUST be ordered by byte-lexicographic `project_id`, matching the `BTreeMap` iteration order in the reference implementation.
 
-Persisted block verification therefore requires both the finalized [`Block`](proto/makechain.proto) and the exact associated [`ExecutionPayload`](proto/makechain.proto). A sync provider serving historical blocks MUST also serve that payload, and a syncing node MUST verify that the served `(Block, ExecutionPayload)` pair yields the payload digest committed by `consensus_finalization`.
+Persisted block verification therefore requires both the finalized [`Block`](../proto/makechain.proto) and the exact associated [`ExecutionPayload`](../proto/makechain.proto). A sync provider serving historical blocks MUST also serve that payload, and a syncing node MUST verify that the served `(Block, ExecutionPayload)` pair yields the payload digest committed by `consensus_finalization`.
 
 The `proposal_digest(R)` value is what validators sign in finalization certificates. The domain separator `b"makechain:execution-payload:v1"` serves as the commitment version identifier. Future commitment format changes MUST use a new domain separator (e.g., `v2`) and require explicit activation semantics.
 
-> **Protocol Upgrade Activation:** The clean-slate address-native network begins at hardfork `Genesis`. Future protocol upgrades are activated by named hardforks with network-defined activation schedules. For any block, the active hardfork is selected from `(chain_id, block_timestamp)`. `BlockHeader.version` and `ExecutionPayload.version` MUST both match the version required by that active hardfork. Replay, sync, and persisted-block verification MUST use the block header's timestamp, not validator wall clock time, when selecting rules. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check and block execution remains authoritative.
+> **Protocol Versioning:** The clean-slate reset network uses a single canonical protocol rule set and a fixed transport version. `BlockHeader.version` and `ExecutionPayload.version` MUST both equal `5`. Replay, sync, and persisted-block verification MUST use the committed block contents and fixed protocol version, not any hardfork activation schedule. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check and block execution remains authoritative.
 
 ### 8.3 Empty Blocks
 
@@ -1085,7 +1196,7 @@ VerificationClaimContract(address owner, address ethAddress, uint256 chainId,
 ```
 Domain: `{ name: "Makechain", version: "1", chainId: host_chain_id(network) }`.
 
-For `ETH_ADDRESS`, both the typed-data field `VerificationClaim.chainId` and the wire field [`VerificationAddBody.chain_id`](proto/makechain.proto#L325) MUST equal `host_chain_id(MessageData.network)`. On the wire, `VerificationAddBody.chain_id` MUST use the minimal unsigned big-endian byte encoding of that host-chain ID. A verifier MUST reject the claim if either value does not match the canonical host-chain ID for the Makechain network.
+For `ETH_ADDRESS`, both the typed-data field `VerificationClaim.chainId` and the wire field [`VerificationAddBody.chain_id`](../proto/makechain.proto) MUST equal `host_chain_id(MessageData.network)`. On the wire, `VerificationAddBody.chain_id` MUST use the minimal unsigned big-endian byte encoding of that host-chain ID. A verifier MUST reject the claim if either value does not match the canonical host-chain ID for the Makechain network.
 
 If `claim_key_type = 3`, `claim_block_hash` MUST be exactly 32 bytes, MUST identify a finalized canonical Tempo block on `host_chain_id(MessageData.network)`, and MUST be bound into the signed payload.
 
@@ -1122,14 +1233,14 @@ Messages accepted into the local mempool are forwarded to all connected validato
 ### 10.3 Sync
 
 New nodes joining the network:
-1. **State sync** — proof-verified download of the current state from a peer via [`GetSyncTarget`](proto/makechain.proto#L635) and [`SyncFetch`](proto/makechain.proto#L636).
-2. **Block sync** — replay missed finalized `(Block, ExecutionPayload)` pairs from the state sync height to the current tip via [`SyncBlocks`](proto/makechain.proto). The execution payload is consensus-critical because it carries the exact committed account-message order and project-message grouping.
+1. **State sync** — proof-verified download of the current state from a peer via [`GetSyncTarget`](../proto/makechain.proto) and [`SyncFetch`](../proto/makechain.proto).
+2. **Block sync** — replay missed finalized `(Block, ExecutionPayload)` pairs from the state sync height to the current tip via [`SyncBlocks`](../proto/makechain.proto). The execution payload is consensus-critical because it carries the exact committed account-message order and project-message grouping.
 
 ### 10.4 Follower Nodes
 
 A **follower node** is a non-validator node that tracks the chain by streaming finalized blocks from one or more validators, replaying state transitions, and serving read queries. Followers do not participate in consensus.
 
-**Block acquisition:** Followers stream blocks from a validator via [`SubscribeBlocks`](proto/makechain.proto) or fall back to polling with [`GetBlock`](proto/makechain.proto). Each received block includes the finalized `Block` structure and its associated canonical `ExecutionPayload`.
+**Block acquisition:** Followers stream blocks from a validator via [`SubscribeBlocks`](../proto/makechain.proto) or fall back to polling with [`GetBlock`](../proto/makechain.proto). Each received block includes the finalized `Block` structure and its associated canonical `ExecutionPayload`.
 
 **Block verification:** For each received block, a follower MUST:
 1. Verify that `consensus_finalization` is a valid finalization certificate from 2f+1 validators over the expected `proposal_digest`.
@@ -1144,7 +1255,7 @@ A **follower node** is a non-validator node that tracks the chain by streaming f
 
 **Trusted snapshot import:** When bootstrapping from a snapshot or archive, the follower MUST track import provenance (source, block height, reported state root, import timestamp). After import, the follower MUST replay blocks from the snapshot height to the chain tip, verifying each block's finalization certificate and state root, before serving queries in a production capacity.
 
-**Reconnection:** On connection loss, followers SHOULD reconnect with exponential backoff. Followers MUST detect and recover from gaps in the block stream by falling back to [`GetBlock`](proto/makechain.proto#L601) polling from the last verified height.
+**Reconnection:** On connection loss, followers SHOULD reconnect with exponential backoff. Followers MUST detect and recover from gaps in the block stream by falling back to [`GetBlock`](../proto/makechain.proto) polling from the last verified height.
 
 ---
 
@@ -1152,30 +1263,32 @@ A **follower node** is a non-validator node that tracks the chain by streaming f
 
 ### 11.1 Effective Limits
 
-Limits scale with active rented storage units:
+Quota-bearing limits scale with `usable_storage_units`, where `usable_storage_units = active_storage_units` only when the account has an active username and `0` otherwise.
 
 | Resource | Effective Limit |
 |----------|-----------------|
-| Projects per account | `10 + storage_units × 10` |
+| Projects per account | `usable_storage_units × 10` |
 | Commit metadata per project | 10,000 |
 | Refs per project | 200 |
-| Collaborators per project | `50 + storage_units × 50` |
-| Merge requests per requester (global, active entries only) | `20 + storage_units × 20` |
-| Merge requests per requester per target project (active entries only) | `max_merge_requests_per_project(storage_units) / 2` |
-| Merge requests per target project (active + tombstones, namespace ceiling) | `20 + storage_units × 20` |
+| Collaborators per project | `usable_storage_units × 50` |
+| Merge requests per requester (global, active entries only) | `usable_storage_units × 20` |
+| Merge requests per requester per target project (active entries only) | `usable_storage_units × 10` |
+| Merge requests per target project (active + tombstones, namespace ceiling) | `usable_storage_units × 20` |
 | Keys per account | 1,000 |
-| Verifications per account | `50 + storage_units × 50` |
-| Links per account | `5,000 + storage_units × 5,000` |
-| Reactions per account | `10,000 + storage_units × 10,000` |
+| Verifications per account | `usable_storage_units × 50` |
+| Links per account | `usable_storage_units × 5,000` |
+| Reactions per account | `usable_storage_units × 10,000` |
 | Commits per bundle | 1,000 |
 
 ### 11.2 Storage Grant Expiry
 
-Each `STORAGE_CLAIM` creates a storage grant that expires at `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` (395 days). Expiry is enforced lazily on mutation paths that consume or free quota: when an account is touched by a quota-enforcing state transition, expired grants are swept, active units recomputed, and pruning re-run if capacity dropped.
+Each `STORAGE_CLAIM` creates a storage grant that expires at `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` (395 days). Expiry is enforced lazily on mutation paths that consume or free quota: when an account is touched by a quota-enforcing state transition, expired grants are swept, raw active units are recomputed, usernames are released if effective active storage reaches zero, and pruning re-run if usable capacity dropped.
 
 Non-quota project-level operations (`REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `PROJECT_METADATA`, `PROJECT_ARCHIVE`) do NOT trigger storage-grant sweeps. Quota-enforcing paths such as `PROJECT_CREATE`, `FORK`, collaborator/link/verification/reaction mutations, and `MERGE_REQUEST_ADD` MUST sweep before enforcement. `MERGE_REQUEST_ADD` is special: it sweeps both the requester's account (for the global active-entry limit) and the target project's owner (for the requester-per-target cap and the target-project namespace ceiling).
 
-Read-only queries MAY derive effective quota from currently active grants without mutating persisted state.
+Read-only queries MAY derive effective quota from currently active grants without mutating persisted state. Account responses MUST expose raw active grants as `storage_units`, MUST derive `max_*` quota fields from usable quota, MUST return zero `max_*` fields whenever the account lacks an active username, and MUST return the canonical username only when the account has both active storage and an active username.
+
+`ACCOUNT_DATA(DISPLAY_NAME)` remains mutable profile metadata. It is distinct from canonical username because display names are not globally unique, not storage-backed, not released on storage expiry, and continue to follow LWW metadata semantics rather than registration semantics.
 
 **Project count overflow after grant expiry:** When an account's storage grants expire and the effective project limit drops below the current project count, existing projects are **grandfathered** — they remain active and functional. The account is blocked from creating new projects until the count is back within the effective limit (either by removing projects or renting additional storage). Projects are never auto-pruned or auto-archived due to grant expiry.
 
@@ -1212,9 +1325,9 @@ For links, verifications, reactions, and collaborators, quota accounting include
 
 Merge requests use a three-check admission model:
 
-- **Requester global active-entry quota:** Each requester is limited to `20 + storage_units × 20` active merge requests across all target projects. This layer counts only active entries discovered via the reverse index under prefix `0x1C` and is enforced by reject-on-exceed. No cross-project pruning occurs.
-- **Requester-per-target active-entry cap:** For any single target project, one requester is limited to `max_merge_requests_per_project(storage_units) / 2` active merge requests against that project. This layer counts only active entries discovered via the reverse-index prefix `[0x1C | requester_owner_address | project_id]` and is enforced by reject-on-exceed. No project-local pruning occurs here.
-- **Target-project namespace ceiling:** Each target project is limited to `20 + storage_units × 20` total merge-request namespace entries (active entries plus tombstones). This layer is enforced by project-local oldest-first pruning under prefix `0x1B` and its tombstones under `[0x03 | 0x1B | project_id | ...]`.
+- **Requester global active-entry quota:** Each requester is limited to `usable_storage_units × 20` active merge requests across all target projects. This layer counts only active entries discovered via the reverse index under prefix `0x1C` and is enforced by reject-on-exceed. No cross-project pruning occurs.
+- **Requester-per-target active-entry cap:** For any single target project, one requester is limited to `usable_storage_units × 10` active merge requests against that project. This layer counts only active entries discovered via the reverse-index prefix `[0x1C | requester_owner_address | project_id]` and is enforced by reject-on-exceed. No project-local pruning occurs here.
+- **Target-project namespace ceiling:** Each target project is limited to `usable_storage_units × 20` total merge-request namespace entries (active entries plus tombstones). This layer is enforced by project-local oldest-first pruning under prefix `0x1B` and its tombstones under `[0x03 | 0x1B | project_id | ...]`.
 
 For merge requests, the global requester quota and the requester-per-target cap MUST both be enforced before the target-project namespace ceiling. An active-entry prune under the target-project namespace ceiling MUST delete the matching reverse row and decrement `project.merge_request_count`. This model prevents a single requester from monopolizing a target project's merge-request namespace while preserving a bounded target-project namespace.
 
@@ -1224,7 +1337,7 @@ For merge requests, the global requester quota and the requester-per-target cap 
 
 The consensus layer stores only message metadata (~100-500 bytes per message). File content is stored externally.
 
-A `COMMIT_BUNDLE` message ([`CommitBundleBody`](proto/makechain.proto#L212)) may include:
+A `COMMIT_BUNDLE` message ([`CommitBundleBody`](../proto/makechain.proto)) may include:
 - `content_digest` — optional 32-byte integrity hash.
 - `url` — optional content locator (max 2048 characters).
 
@@ -1240,51 +1353,22 @@ Specification versions use [CalVer](https://calver.org/) (`YYYY.M.PATCH`). Each 
 
 **Specification releases** are cut when consensus-critical semantics change (new message types, modified state transitions, key schema changes). Non-consensus changes (clarifications, formatting, appendix additions) do not require a new version.
 
-**Protocol upgrades** are governed by named hardforks. The clean-slate address-native network begins at hardfork `Genesis`. Future hardforks MAY be defined by later specification releases.
+**Protocol versioning** for the clean-slate reset network is fixed.
 
-The active hardfork is selected from `(network, block_timestamp)`:
+### 13.1 Fixed Transport Version
 
-```
-active_hardfork(network, block_timestamp) -> Hardfork
-is_hardfork_active(network, hardfork, block_timestamp) -> bool
-```
+- `BlockHeader.version = 5`
+- `ExecutionPayload.version = 5`
 
-### 13.1 Network Schedules
+`ExecutionPayload.version` MUST mirror the committed block header version. A node MUST fail closed if either field does not match the fixed protocol version required by this specification.
 
-Activation schedules are part of the protocol implementation and MUST be compiled into the binary, not sourced from ordinary per-node CLI, environment, or TOML overrides.
+### 13.2 Replay and Admission Semantics
 
-For the clean-slate network, `Genesis` is active from block 0. Additional hardforks, if any, MUST define compiled activation schedules per network before activation.
+- Block verification, execution, replay, and sync use the single canonical rule set defined by this specification.
+- Submit and `DryRunMessage` do not yet know the final block timestamp, so they MUST use current node time as a best-effort precheck for timestamp-sensitive rules.
+- Block execution remains authoritative.
 
-### 13.2 Version Mapping
-
-Each hardfork defines the required wire version for consensus-visible block and execution payloads.
-
-For the clean-slate `Genesis` baseline:
-
-- `Genesis -> BlockHeader.version = 5`, `ExecutionPayload.version = 5`
-
-`ExecutionPayload.version` MUST mirror the committed block header version. A node MUST fail closed if either field does not match the version required by the active hardfork for that block's `(network, timestamp)`.
-
-Same-wire semantic changes fail closed because replay, execution, and verification select the active hardfork before validating or applying messages. Incompatible wire-version changes fail closed because the committed block header and execution-payload version no longer match the expected hardfork version.
-
-### 13.3 Replay and Admission Semantics
-
-- Block verification, execution, replay, and sync MUST select rules from the block header's `(chain_id, timestamp)`.
-- Submit and `DryRunMessage` do not yet know the final block timestamp, so they MUST use current node time as a best-effort precheck for not-yet-active features.
-- Block execution remains authoritative. Validators MUST re-check the active hardfork during execution and replay even if admission already checked it.
-
-There are no pre-reset protocol eras within this clean-slate network. Replay and sync therefore operate entirely within the post-reset history rooted at `Genesis`.
-
-### 13.4 Adding a New Hardfork
-
-To add a new hardfork safely:
-
-1. Add the new hardfork name to the ordered hardfork enum.
-2. Add compiled activation timestamps for each network.
-3. Add or update the hardfork-to-version mapping for `BlockHeader.version` and `ExecutionPayload.version`.
-4. Gate each new consensus-critical rule explicitly in validation, execution, and replay paths.
-5. Add pre-activation and post-activation tests for submit, dry-run, execution, and replay.
-6. Update this specification with the new schedule, version mapping, and rule changes before activation.
+Replay and sync operate entirely within the post-reset history and canonical rule set defined by this specification.
 
 ---
 
@@ -1345,11 +1429,11 @@ The zero address remains the fail-closed sentinel. Networks whose `settlement_co
 
 ## Appendix B: Wire Format and Canonical Encoding
 
-The canonical wire format for all protocol messages is [Protocol Buffers v3][protobuf] as defined in [`proto/makechain.proto`](proto/makechain.proto). This file is the normative reference for field numbers, types, and encoding of core structures such as [`Message`](proto/makechain.proto#L9), [`ExecutionPayload`](proto/makechain.proto), and [`Block`](proto/makechain.proto#L503).
+The canonical wire format for all protocol messages is [Protocol Buffers v3][protobuf] as defined in [`proto/makechain.proto`](../proto/makechain.proto). This file is the normative reference for field numbers, types, and encoding of core structures such as [`Message`](../proto/makechain.proto), [`ExecutionPayload`](../proto/makechain.proto), and [`Block`](../proto/makechain.proto).
 
 ### B.1 Canonical Encoding Rules
 
-The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. In this version, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
+The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. For `2026.5.2`, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
 
 The reference encoding follows these rules:
 
@@ -1378,11 +1462,11 @@ The reference implementation uses Rust's `serde_json` library. Independent imple
 
 ### B.3 Block Hash
 
-Block hash: `H(canonical_encode(BlockHeader))` where `canonical_encode` follows the same protobuf determinism rules as [`MessageData`](proto/makechain.proto#L17) encoding; see [`BlockHeader`](proto/makechain.proto#L512).
+Block hash: `H(canonical_encode(BlockHeader))` where `canonical_encode` follows the same protobuf determinism rules as [`MessageData`](../proto/makechain.proto) encoding; see [`BlockHeader`](../proto/makechain.proto).
 
 ### B.4 Proposal Digest
 
-The proposal digest committed by `consensus_finalization` is a domain-separated BLAKE3 hash of the canonical protobuf encoding of [`ExecutionPayload`](proto/makechain.proto):
+The proposal digest committed by `consensus_finalization` is a domain-separated BLAKE3 hash of the canonical protobuf encoding of [`ExecutionPayload`](../proto/makechain.proto):
 
 ```
 proposal_digest(R) = H(b"makechain:execution-payload:v1" || len(wire) as uint64 LE || wire)
@@ -1390,7 +1474,7 @@ proposal_digest(R) = H(b"makechain:execution-payload:v1" || len(wire) as uint64 
 
 where `wire = canonical_encode(ExecutionPayload_proto(R))` following the rules in B.1. The length prefix prevents ambiguity between the domain separator and the payload bytes.
 
-Field ordering within the [`ProjectMessages`](proto/makechain.proto#L443) entries in `project_messages` is consensus-critical: entries MUST appear in byte-lexicographic order of their 32-byte `project_id`. Implementations that do not guarantee this ordering will produce a different digest and fail verification.
+Field ordering within the [`ProjectMessages`](../proto/makechain.proto) entries in `project_messages` is consensus-critical: entries MUST appear in byte-lexicographic order of their 32-byte `project_id`. Implementations that do not guarantee this ordering will produce a different digest and fail verification.
 
 ## Appendix C: Tempo Integration Summary (Non-Normative)
 
@@ -1440,22 +1524,40 @@ For every forward entry under prefixes `0x06`, `0x10`, `0x12`, the corresponding
 ### INV-11: Storage Claim Idempotence
 Once a `claim_id` is persisted under prefix `0x17`, any subsequent `STORAGE_CLAIM` carrying the same logical settlement coordinates MUST be a no-op.
 
-### INV-12: Merge Request Count Consistency
+### INV-12: Username Uniqueness
+At any effective swept state, no two distinct owners simultaneously hold the same active username.
+
+### INV-13: Username Index Consistency
+For every owner with `AccountState.username = u`, the username index entry `[0x08 | u] -> owner_address` MUST exist, and for every username index entry `[0x08 | u] -> owner_address`, the corresponding account's `AccountState.username` MUST be `u` after required sweep reconciliation.
+
+### INV-14: Storage-Backed Username Lifetime
+After required sweep at time `t`, if `active_storage_units(owner, t) = 0` the owner has no active username. If the owner has an active username after required reconciliation, then `active_storage_units(owner, t) > 0`.
+
+### INV-15: Duplicate Claim Replay Independence from Delegated-Key State
+Once a `claim_id` is persisted under prefix `0x17`, any later settlement-valid `STORAGE_CLAIM` for the same settlement coordinates is a no-op and no delegated-key state is consulted.
+
+### INV-16: Canonical Username Persistence
+All persisted username state MUST use the canonical normalized lowercase ASCII form in both `AccountState.username` and username-index key suffixes.
+
+### INV-17: Username-Gated Usable Quota
+If an owner lacks an active username after required reconciliation at time `t`, then `usable_storage_units(owner, t) = 0` and all username-gated `max_*` quota fields derived from usable storage are zero.
+
+### INV-18: Merge Request Count Consistency
 For every project, `project.merge_request_count` MUST equal the count of active merge-request forward rows under `[0x1B | project_id]`.
 
-### INV-13: Merge Request Reverse Index Consistency
+### INV-19: Merge Request Reverse Index Consistency
 For every active merge-request forward row there MUST be exactly one matching reverse row, and vice versa. Handlers and cleanup paths MUST maintain both atomically.
 
-### INV-14: Merge Request Closure Attribution Is Historical
+### INV-20: Merge Request Closure Attribution Is Historical
 Canonical merge-request state does not record who closed a request. Closure attribution exists only in finalized `MERGE_REQUEST_REMOVE` history.
 
-### INV-15: Merge Request Content-Addressed Uniqueness
+### INV-21: Merge Request Content-Addressed Uniqueness
 A merge-request identity is `request_id = Message.hash` of the `MERGE_REQUEST_ADD` message. Re-opening therefore requires a fresh add and a fresh identity.
 
-### INV-16: Cross-Project Lineage Integrity
+### INV-22: Cross-Project Lineage Integrity
 Every accepted `MERGE_REQUEST_ADD` points from a source project whose retained `0x1A` fork-parent chain reaches the target project within `MAX_FORK_LINEAGE_DEPTH` hops.
 
-### INV-17: Source Ref Binding
+### INV-23: Source Ref Binding
 Every accepted `MERGE_REQUEST_ADD` binds a concrete source ref head at creation time: `ref(source_project_id, source_ref).commit_hash == source_commit_hash`.
 
 ## Appendix E: Genesis State
@@ -1476,9 +1578,11 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
+| 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's usable storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
 | 2026.5.1 | 2026-04-16 | Amend MIP 5 merge-request quota semantics to use a requester-global active-entry limit plus a target-project namespace ceiling, and allow requester withdrawal of active merge requests from removed target projects while the active row still exists. |
 | 2026.5.0 | 2026-04-15 | Canonically integrate MIP 5 merge requests: add `MERGE_REQUEST_ADD` / `MERGE_REQUEST_REMOVE`, retained fork-lineage rows, merge-request quota and proof surfaces, dual close authorization, public merge-request queries, and merge-request correctness invariants. |
+| 2026.4.3 | 2026-04-16 | Split username lifecycle from `STORAGE_CLAIM`: restore settlement-only `STORAGE_CLAIM` funding semantics, add explicit `USERNAME_CREATE` and `USERNAME_UPDATE` control surfaces, make quota depend on username-gated usable storage instead of raw grants, remove free-tier write capacity, and update proofs, validation, and invariants accordingly. |
+| 2026.4.2 | 2026-04-14 | Fold MIP 4 registration-time usernames into the clean-slate reset baseline: add canonical username semantics to `STORAGE_CLAIM`, define the `0x08` username index, extend `AccountState` and account reads with `username`, require sweep-time username release and stale-reservation reclamation, and expose username keys on the public operation/exclusion proof surface without adding new RPCs. |
 | 2026.4.1 | 2026-04-10 | Align the canonical specification with MIP 3 clean-slate semantics: keep `Genesis` as the reset-network baseline hardfork, complete ERC-1271 and address-derivation rules, clarify duplicate `STORAGE_CLAIM` idempotence and claim-id construction, tighten message and network validation, and make state-value encoding fully normative. |
 | 2026.4.0 | 2026-04-05 | Replace canonical relay payload commitment with canonical `ExecutionPayload`, require version `5`, remove `relay_checkpoint` from canonical block and payload encoding, and require persisted `(Block, ExecutionPayload)` verification. |
 | 2026.3.3 | 2026-03-30 | Commit `relay_checkpoint` in `BlockHeader` and `RelayPayload`, define tri-state replay verification and `ReplayVerificationStatus`, document replay-sensitive fail-closed surfaces, and specify the genesis zero-checkpoint sentinel. |
