@@ -8,7 +8,7 @@
 
 A specialized protocol built for making things.
 
-**Version:** 2026.5.3
+**Version:** 2026.5.2
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every committed message is verifiable from canonical state and, where applicable, finalized message-local external evidence.
 
@@ -1586,7 +1586,6 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2026.5.3 | 2026-04-23 | Add a 7-day cooldown for `USERNAME_UPDATE`, persist `username_last_set_at` in account state, and clarify that sweep-time username release does not block a later fresh `USERNAME_CREATE`. |
 | 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's usable storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
 | 2026.5.1 | 2026-04-16 | Amend MIP 5 merge-request quota semantics to use a requester-global active-entry limit plus a target-project namespace ceiling, and allow requester withdrawal of active merge requests from removed target projects while the active row still exists. |
 | 2026.5.0 | 2026-04-15 | Canonically integrate MIP 5 merge requests: add `MERGE_REQUEST_ADD` / `MERGE_REQUEST_REMOVE`, retained fork-lineage rows, merge-request quota and proof surfaces, dual close authorization, public merge-request queries, and merge-request correctness invariants. |
