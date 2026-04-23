@@ -8,7 +8,7 @@
 
 A specialized protocol built for making things.
 
-**Version:** 2026.5.2
+**Version:** 2026.5.3
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every committed message is verifiable from canonical state and, where applicable, finalized message-local external evidence.
 
@@ -277,6 +277,7 @@ An account is identified by `owner_address` (`bytes(20)`). Each account's state 
 | `project_count` | `uint32` | Number of owned projects. |
 | `key_count` | `uint32` | Number of registered delegated keys. |
 | `username` | `string \| null` | Canonical lowercase username when the account has completed username registration and still has active storage. |
+| `username_last_set_at` | `uint32` | Consensus timestamp of the most recent successful `USERNAME_CREATE` or `USERNAME_UPDATE`. |
 
 There is no onchain account allocation, transfer, or recovery flow in V2.
 
@@ -307,9 +308,12 @@ Accounts may hold at most one active username.
 - A username is a globally unique human-readable handle layered on top of canonical `owner_address` identity.
 - Usernames are created by `USERNAME_CREATE` once the account has active raw storage grants and no active username.
 - Usernames are changed by `USERNAME_UPDATE` while the account still has active raw storage grants.
+- `USERNAME_UPDATE` is subject to `USERNAME_CHANGE_COOLDOWN`: the message timestamp MUST be at least 7 days after the account's most recent successful username set.
+- Successful `USERNAME_CREATE` and `USERNAME_UPDATE` both reset the cooldown clock by writing `username_last_set_at = MessageData.timestamp`.
 - Raw storage grants MAY exist while the account has no active username.
 - Quota-bearing storage use is gated on an active username; if the account has no active username, usable quota is zero.
 - When required sweep reconciles an account to zero effective active storage, the username reservation is released.
+- The cooldown applies only to `USERNAME_UPDATE`; releasing a username due to sweep does not block a later fresh `USERNAME_CREATE`.
 
 Canonical username form:
 
@@ -413,8 +417,8 @@ Dropped messages are excluded from the committed block but do not halt execution
 | `COLLABORATOR_ADD` | 2P add | `collaborator(project_id, target_owner_address)`, optionally clears `tombstone(collaborator(...))` |
 | `COLLABORATOR_REMOVE` | 2P remove | deletes `collaborator(project_id, target_owner_address)`, `tombstone(collaborator(...))` |
 | `STORAGE_CLAIM` | Settlement-verified storage-funding message | `storage_grant(owner_address, expires_at, claim_id)`, `storage_claim_marker(claim_id)`, `account(owner_address)` [`storage_units`] |
-| `USERNAME_CREATE` | 1P State transition | `account(owner_address)` [`username`], `username_index(username)` |
-| `USERNAME_UPDATE` | 1P State transition | `account(owner_address)` [`username`], deletes old `username_index(current)`, writes `username_index(next)` |
+| `USERNAME_CREATE` | 1P State transition | `account(owner_address)` [`username`, `username_last_set_at`], `username_index(username)` |
+| `USERNAME_UPDATE` | 1P State transition | `account(owner_address)` [`username`, `username_last_set_at`], deletes old `username_index(current)`, writes `username_index(next)` |
 | `SIGNER_ADD` | Custody-auth | `key(owner_address, pubkey)`, `key_reverse(pubkey)`, `account(owner_address)` [custody_nonce++, key_count++] |
 | `SIGNER_REMOVE` | Custody-auth | deletes `key(owner_address, pubkey)`, `key_reverse(pubkey)`, `account(owner_address)` [custody_nonce++, key_count--] |
 | `VERIFICATION_ADD` | 2P add | `verification(owner_address, addr)`, `counter(owner_address, 0x03)`, optionally clears tombstone |
@@ -428,7 +432,7 @@ Dropped messages are excluded from the committed block but do not halt execution
 
 Key names reference Section 6.1 prefixes. 2P add/remove handlers also interact with prune markers (`0x15`) during quota pruning (Section 11.4). `MessageType::None` returns `Err`.
 
-`STORAGE_CLAIM`, `USERNAME_CREATE`, and `USERNAME_UPDATE` remain Phase 1 account messages. Validators execute them in the ordinary serial account-message order, so an earlier successful `STORAGE_CLAIM` may enable a later `USERNAME_CREATE` in the same block, and an earlier `USERNAME_UPDATE` may free a username before a later same-block claim attempts to take it. Later conflicting messages are dropped as ordinary invalid account messages; they do not invalidate the whole block.
+`STORAGE_CLAIM`, `USERNAME_CREATE`, and `USERNAME_UPDATE` remain Phase 1 account messages. Validators execute them in the ordinary serial account-message order, so an earlier successful `STORAGE_CLAIM` may enable a later `USERNAME_CREATE` in the same block, an earlier successful username set may start or reset the cooldown before a later same-block `USERNAME_UPDATE`, and an earlier `USERNAME_UPDATE` may free a username before a later same-block claim attempts to take it. Later conflicting messages are dropped as ordinary invalid account messages; they do not invalidate the whole block.
 
 **Project identity and 2P set semantics.** Although `PROJECT_CREATE` and `PROJECT_REMOVE` are listed as 2P Set add/remove pairs, projects do not follow the generic `apply_2p_add` re-add path from Section 4.4.2. This is a consequence of content-addressed identity: `project_id = H(MessageData)` (Section 2.5), so every fresh `PROJECT_CREATE` message produces a unique `project_id`. There is no way to construct a new `PROJECT_CREATE` that targets an existing project's identity. A `PROJECT_CREATE` whose derived `project_id` matches an existing project entry MUST be rejected regardless of the project's current status. `PROJECT_ARCHIVE` is a terminal state transition — archived projects cannot be reverted to `Active`, but they can be forked or subsequently removed.
 
@@ -1019,8 +1023,8 @@ These checks require state lookups:
 - **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
 - **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op. Otherwise claimant expired storage grants MUST be swept at `MessageData.timestamp`, the raw storage grant MUST be added, and cached `AccountState.storage_units` MUST be refreshed. `STORAGE_CLAIM` does not assign or update usernames.
-- **`USERNAME_CREATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must not already have an active username. The requested username must be available after mandatory stale-reservation reclamation.
-- **`USERNAME_UPDATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must already have an active username. The current username index entry MUST authenticate `[0x08 | current_username] -> owner_address`, otherwise execution MUST fail closed. The requested username must differ from the current username and must be available after mandatory stale-reservation reclamation.
+- **`USERNAME_CREATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must not already have an active username. The requested username must be available after mandatory stale-reservation reclamation. On success, execution MUST set `AccountState.username_last_set_at = MessageData.timestamp`.
+- **`USERNAME_UPDATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must already have an active username. The current username index entry MUST authenticate `[0x08 | current_username] -> owner_address`, otherwise execution MUST fail closed. The requested username must differ from the current username and must be available after mandatory stale-reservation reclamation. The message timestamp MUST be at least `AccountState.username_last_set_at + USERNAME_CHANGE_COOLDOWN`, using saturating `uint32` arithmetic for the comparison. On success, execution MUST set `AccountState.username_last_set_at = MessageData.timestamp`.
 - **`MERGE_REQUEST_ADD`:** Target project exists and is `Active`; source project exists and is not `Removed`; `source_project_id != project_id`; the source project's retained `0x1A` fork-parent chain reaches the target within `MAX_FORK_LINEAGE_DEPTH = 256`; private-target and private-source access checks pass; `source_ref` exists in the source project and resolves exactly to `source_commit_hash`; the referenced source commit exists; after expired-grant sweeping and pending-add reservation, the requester remains within the global active-entry merge-request limit, the requester remains within the requester-per-target active-entry cap of `usable_storage_units × 10` derived from the target owner's usable storage units, and the target project remains within its merge-request namespace ceiling.
 - **`MERGE_REQUEST_REMOVE`:** An active merge request exists at `(project_id, request_id)`; if the remover is the original requester, closure remains valid even if the target project has become `Removed`, provided the active merge-request row still exists; otherwise the target project exists and is not `Removed`; either requester withdrawal or target-project `WRITE+` maintainer closure authorization succeeds; source project status is not checked.
 
@@ -1282,7 +1286,7 @@ Quota-bearing limits scale with `usable_storage_units`, where `usable_storage_un
 
 ### 11.2 Storage Grant Expiry
 
-Each `STORAGE_CLAIM` creates a storage grant that expires at `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` (395 days). Expiry is enforced lazily on mutation paths that consume or free quota: when an account is touched by a quota-enforcing state transition, expired grants are swept, raw active units are recomputed, usernames are released if effective active storage reaches zero, and pruning re-run if usable capacity dropped.
+Each `STORAGE_CLAIM` creates a storage grant that expires at `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` (395 days). Expiry is enforced lazily on mutation paths that consume or free quota: when an account is touched by a quota-enforcing state transition, expired grants are swept, raw active units are recomputed, usernames are released if effective active storage reaches zero, and pruning re-run if usable capacity dropped. Sweep-time username release clears the active username reservation only; it does not reset `username_last_set_at`.
 
 Non-quota project-level operations (`REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `PROJECT_METADATA`, `PROJECT_ARCHIVE`) do NOT trigger storage-grant sweeps. Quota-enforcing paths such as `PROJECT_CREATE`, `FORK`, collaborator/link/verification/reaction mutations, and `MERGE_REQUEST_ADD` MUST sweep before enforcement. `MERGE_REQUEST_ADD` is special: it sweeps both the requester's account (for the global active-entry limit) and the target project's owner (for the requester-per-target cap and the target-project namespace ceiling).
 
@@ -1398,6 +1402,7 @@ Replay and sync operate entirely within the post-reset history and canonical rul
 | `MEMPOOL_CAPACITY` | 100,000 | Default mempool capacity |
 | `MAX_BLOCK_MESSAGES` | 10,000 | Default max messages per block |
 | `MAX_PROJECT_MESSAGES` | 500 | Default max messages per project per block |
+| `USERNAME_CHANGE_COOLDOWN` | 7 days | Minimum time between successful username sets before `USERNAME_UPDATE` is allowed again |
 | `STORAGE_RENTAL_PERIOD` | 365 days | Base storage rental period |
 | `STORAGE_GRACE_PERIOD` | 30 days | Grace period after rental expiry |
 | `STORAGE_TOTAL_PERIOD` | 395 days | `STORAGE_RENTAL_PERIOD + STORAGE_GRACE_PERIOD` |
@@ -1560,6 +1565,9 @@ Every accepted `MERGE_REQUEST_ADD` points from a source project whose retained `
 ### INV-23: Source Ref Binding
 Every accepted `MERGE_REQUEST_ADD` binds a concrete source ref head at creation time: `ref(source_project_id, source_ref).commit_hash == source_commit_hash`.
 
+### INV-24: Username Update Cooldown
+If an account's most recent successful username set occurred at `username_last_set_at = t`, then any later successful `USERNAME_UPDATE` for that account MUST satisfy `MessageData.timestamp ≥ t + USERNAME_CHANGE_COOLDOWN`, evaluated with saturating `uint32` arithmetic. Successful `USERNAME_CREATE` and `USERNAME_UPDATE` both rewrite `username_last_set_at` to the accepted message timestamp.
+
 ## Appendix E: Genesis State
 
 The genesis state `σ₀` is the empty key-value store. No pre-registered accounts, projects, or validator identities exist in protocol state. The genesis block (block 0) has:
@@ -1578,6 +1586,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.5.3 | 2026-04-23 | Add a 7-day cooldown for `USERNAME_UPDATE`, persist `username_last_set_at` in account state, and clarify that sweep-time username release does not block a later fresh `USERNAME_CREATE`. |
 | 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's usable storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
 | 2026.5.1 | 2026-04-16 | Amend MIP 5 merge-request quota semantics to use a requester-global active-entry limit plus a target-project namespace ceiling, and allow requester withdrawal of active merge requests from removed target projects while the active row still exists. |
 | 2026.5.0 | 2026-04-15 | Canonically integrate MIP 5 merge requests: add `MERGE_REQUEST_ADD` / `MERGE_REQUEST_REMOVE`, retained fork-lineage rows, merge-request quota and proof surfaces, dual close authorization, public merge-request queries, and merge-request correctness invariants. |
