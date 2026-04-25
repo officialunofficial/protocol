@@ -14,14 +14,15 @@ requires: MIP-0003
 
 This MIP specifies storage-backed usernames for address-native Makechain networks defined by MIP-0003.
 
-It has six parts:
+It has seven parts:
 
 1. Add a globally unique username namespace keyed to `owner_address`.
 2. Keep `STORAGE_CLAIM` as settlement-verified raw storage funding only.
 3. Add explicit `USERNAME_CREATE` and `USERNAME_UPDATE` messages for username control.
 4. Gate quota-bearing account activity on both active storage and an active username.
-5. Release usernames when storage fully expires, using Makechain's lazy storage-sweep model.
-6. Expose username-backed account and proof behavior through the canonical API surface.
+5. Add a cooldown period after a successful username set before the account may use `USERNAME_UPDATE` again.
+6. Release usernames when storage fully expires, using Makechain's lazy storage-sweep model.
+7. Expose username-backed account and proof behavior through the canonical API surface.
 
 This proposal builds on MIP-0003 and does not change the canonical identity model. `owner_address` remains the sole canonical account identifier. Usernames are a separate, storage-backed, human-readable namespace layered on top of address-native identity.
 
@@ -89,7 +90,10 @@ Required semantics:
 - if the account has raw active storage grants but no active username, its usable quota is zero
 - `USERNAME_CREATE` claims the first username for an account with active storage and no active username
 - `USERNAME_UPDATE` replaces the current username for an account with active storage and an active username
+- `USERNAME_UPDATE` MUST be rejected until `USERNAME_CHANGE_COOLDOWN = 7 days` has elapsed since the account's most recent successful username set
+- both successful `USERNAME_CREATE` and successful `USERNAME_UPDATE` MUST reset the cooldown clock by persisting `username_last_set_at = MessageData.timestamp`
 - when an account's effective active storage drops to zero after required sweep, its username reservation MUST be pruned and become available again
+- the cooldown applies only to `USERNAME_UPDATE`; releasing a username does not block a later fresh `USERNAME_CREATE`
 
 Usernames are not canonical identity. `owner_address` remains canonical. A username is a globally unique, storage-backed namespace reservation.
 
@@ -218,13 +222,14 @@ Required semantics:
 
 #### 5.2 Account State and Usable Quota
 
-The canonical logical account model includes `username: string | null` alongside raw `storage_units`.
+The canonical logical account model includes `username: string | null` and `username_last_set_at: uint32` alongside raw `storage_units`.
 
 Required semantics:
 
 - `AccountState.username` is `null` when the account has no active username reservation
 - if `AccountState.username != null`, it MUST be the canonical lowercase username
 - if `AccountState.username != null`, the username index entry `[0x08 | username] -> owner_address` MUST exist
+- `AccountState.username_last_set_at` is the consensus timestamp of the most recent successful `USERNAME_CREATE` or `USERNAME_UPDATE`, or `0` if no username has ever been set
 - raw `storage_units` reflect active storage grants only
 - usable quota is derived from raw storage plus username activation
 - if the account lacks an active username after required reconciliation, usable quota is zero even if raw storage grants are positive
@@ -314,7 +319,10 @@ apply_username_create(sigma, M):
   let username = normalize_username(body.username)
   require username_available_after_reclamation(username, owner, M.data.timestamp)
 
-  sigma[account(owner)] <- acct with { username = username }
+  sigma[account(owner)] <- acct with {
+    username = username,
+    username_last_set_at = M.data.timestamp,
+  }
   sigma[username_index(username)] <- owner
 ```
 
@@ -329,9 +337,10 @@ Required validation:
 3. the claimant MUST have active raw storage after sweep
 4. the claimant MUST already have an active username
 5. the current username index entry MUST authenticate `[0x08 | current_username] -> owner_address`, otherwise execution MUST fail closed
-6. the requested username MUST differ from the current username
-7. the requested username MUST be canonical and structurally valid
-8. the requested username MUST be available after mandatory stale-reservation reclamation
+6. `MessageData.timestamp` MUST be at least `AccountState.username_last_set_at + USERNAME_CHANGE_COOLDOWN`, using saturating `uint32` arithmetic for the comparison
+7. the requested username MUST differ from the current username
+8. the requested username MUST be canonical and structurally valid
+9. the requested username MUST be available after mandatory stale-reservation reclamation
 
 Canonical execution shape:
 
@@ -347,13 +356,18 @@ apply_username_update(sigma, M):
   let current = acct.username
   require current != null
   require username_index(current) == owner
+  require M.data.timestamp >= saturating_add(acct.username_last_set_at,
+                                             USERNAME_CHANGE_COOLDOWN)
 
   let next = normalize_username(body.username)
   require next != current
   require username_available_after_reclamation(next, owner, M.data.timestamp)
 
   delete sigma[username_index(current)]
-  sigma[account(owner)] <- acct with { username = next }
+  sigma[account(owner)] <- acct with {
+    username = next,
+    username_last_set_at = M.data.timestamp,
+  }
   sigma[username_index(next)] <- owner
 ```
 
@@ -383,6 +397,7 @@ Required sweep behavior for owner `A` at time `t`:
 - if the post-sweep effective active storage units for `A` equal zero and `AccountState.username != null`:
   - delete `[0x08 | username]`
   - set `AccountState.username = null`
+- `AccountState.username_last_set_at` is retained when sweep releases a username reservation; sweep does not reset the cooldown timestamp
 
 This applies both when sweeping the claimant during ordinary quota enforcement and when sweeping a conflicting indexed owner during stale username reclamation.
 
@@ -394,6 +409,7 @@ Required rule:
 
 - `STORAGE_CLAIM`, `USERNAME_CREATE`, and `USERNAME_UPDATE` are processed using the normal serial account-message execution order
 - an earlier successful `STORAGE_CLAIM` MAY enable a later `USERNAME_CREATE` in the same block
+- an earlier successful `USERNAME_CREATE` or `USERNAME_UPDATE` MAY start or reset the cooldown before a later same-block `USERNAME_UPDATE`
 - an earlier successful `USERNAME_UPDATE` MAY free a username before a later same-block claim attempts to take it
 - later conflicting messages in the same block MUST fail ordinary state validation and be dropped
 - conflicting same-username attempts in one block do not by themselves make the whole block invalid
@@ -460,6 +476,12 @@ Why gate usable quota on an active username:
 - tying quota-bearing activity to an active username makes the namespace economically meaningful
 - raw grants can remain visible without automatically enabling account activity
 
+Why add a username-update cooldown:
+
+- it prevents accounts from churning identities with unlimited `USERNAME_UPDATE` messages
+- it preserves explicit delegated-key username control without changing the wire schema
+- it keeps the mitigation account-local and deterministic under normal timestamp rules
+
 Why keep username off the settlement contract:
 
 - username uniqueness is Makechain state, not Tempo settlement state
@@ -495,6 +517,10 @@ Rejected because MIP-4 intentionally gates quota-bearing activity on both active
 
 Rejected because the proposal explicitly defines usernames as paid-storage-backed namespace reservations.
 
+#### Add a new cooldown message or protobuf field
+
+Rejected because the cooldown is fully expressible as ordinary account state plus a protocol constant. Extending the wire schema would widen scope without adding new consensus capability.
+
 ### 11. Security Considerations
 
 This proposal introduces a globally contended namespace and therefore adds several security-sensitive edges.
@@ -509,6 +535,7 @@ Username authorization:
 
 - `USERNAME_CREATE` and `USERNAME_UPDATE` require delegated-key scope `SIGNING`
 - username lifecycle control is separate from settlement-backed storage funding
+- successful username sets start or reset a 7-day cooldown before `USERNAME_UPDATE` may succeed again
 
 Duplicate claim safety:
 
@@ -532,6 +559,7 @@ Denial of service:
 
 - username conflicts may force execution-time sweep of a conflicting indexed owner
 - implementations should keep this bounded by reusing existing storage-sweep code paths rather than performing unbounded scans
+- unlimited rename churn is mitigated by the `USERNAME_UPDATE` cooldown, reducing namespace and identity spam without affecting first registration
 
 ### 12. Acceptance Criteria
 
@@ -542,11 +570,14 @@ This MIP is considered specified when all of the following are true:
 - `STORAGE_CLAIM` remains settlement-verified and duplicate-idempotent, and first successful application does not require delegated-key authorization
 - `USERNAME_CREATE` and `USERNAME_UPDATE` are delegated-key-authorized by `owner_address` with required scope `SIGNING`
 - a global username index is defined in consensus state at prefix `0x08`
-- `AccountState.username` is part of the canonical state model and serialized as `string | null`
+- `AccountState.username` and `AccountState.username_last_set_at` are part of the canonical state model and serialized canonically
 - `GetAccountResponse.username` is exposed on the canonical public account surface at field number `21`
 - raw active storage grants may exist without an active username
+- both successful `USERNAME_CREATE` and `USERNAME_UPDATE` write `username_last_set_at = MessageData.timestamp`
+- `USERNAME_UPDATE` is rejected until `USERNAME_CHANGE_COOLDOWN = 7 days` has elapsed since the account's most recent successful username set
 - usable quota is zero whenever the account lacks an active username after required reconciliation
 - username release is defined through required storage sweep when effective active storage reaches zero
+- sweep-time username release does not reset `username_last_set_at` and does not block a later fresh `USERNAME_CREATE`
 - stale conflicting username reservations are deterministically reclaimed after sweeping the indexed owner to zero effective active storage
 - same-block interactions among `STORAGE_CLAIM`, `USERNAME_CREATE`, and `USERNAME_UPDATE` are handled by normal serial execution and dropping of later invalid messages
 - username index keys are available on the public operation and exclusion proof surfaces
