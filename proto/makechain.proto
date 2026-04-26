@@ -568,6 +568,8 @@ service MakechainService {
   rpc ListCollaborators(ListCollaboratorsRequest) returns (ListCollaboratorsResponse);
 
   // Read path — account
+  rpc SearchAccounts(SearchAccountsRequest) returns (ListAccountsResponse);
+  rpc ListAccounts(ListAccountsRequest) returns (ListAccountsResponse);
   rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
   rpc GetAccountByKey(GetAccountByKeyRequest) returns (GetAccountResponse);
   rpc GetAccountActivity(GetAccountActivityRequest) returns (GetAccountActivityResponse);
@@ -816,6 +818,17 @@ message ListCollaboratorsResponse {
 
 // --- Account ---
 
+message SearchAccountsRequest {
+  string query = 1;   // Username prefix search (case-insensitive)
+  uint32 limit = 2;
+  bytes cursor = 3;   // Opaque pagination cursor
+}
+
+message ListAccountsRequest {
+  uint32 limit = 1;
+  bytes cursor = 2;   // Opaque pagination cursor
+}
+
 message GetAccountRequest {
   reserved 1;               // was mid
   bytes owner_address = 2;  // 20-byte owner address
@@ -847,6 +860,26 @@ message GetAccountResponse {
   uint32 max_merge_requests_per_requester = 19;
   uint32 max_merge_requests_per_project = 20;
   string username = 21;       // Canonical active username (empty when no active username)
+  uint32 key_count = 22;
+  uint32 verification_count = 23;
+}
+
+message AccountSummary {
+  bytes owner_address = 1;  // 20-byte EVM wallet address
+  string username = 2;      // Canonical active username (empty when no active username)
+  string display_name = 3;
+  string avatar = 4;
+  uint32 storage_units = 5;
+  uint32 project_count = 6;
+  uint32 key_count = 7;
+  uint32 verification_count = 8;
+  uint32 link_count = 9;
+  uint32 reaction_count = 10;
+}
+
+message ListAccountsResponse {
+  repeated AccountSummary accounts = 1;
+  bytes next_cursor = 2;
 }
 
 message KeyEntry {
