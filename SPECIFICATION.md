@@ -1081,6 +1081,7 @@ ExecutionPayload {
   parent_hash:       bytes(32)
   chain_id:          uint32
   version:           uint32
+  reshare:           ResharePayload?  // Optional DKG/reshare data committed with the block
 }
 ```
 
@@ -1092,22 +1093,22 @@ The finalized block header authenticates the post-execution state root; the fina
 
 ```
 let wire = canonical_encode(ExecutionPayload_proto(R))
-proposal_digest(R) = H(b"makechain:execution-payload:v1" || len(wire) as uint64 LE || wire)
+proposal_digest(R) = H(b"makechain:execution-payload:v2" || len(wire) as uint64 LE || wire)
 ```
 
 Where:
 - `ExecutionPayload_proto(R)` converts the logical `ExecutionPayload` to its Protocol Buffers message form.
 - `canonical_encode` follows the determinism rules in Appendix B.1.
 - `len(wire)` is the byte length of the encoded protobuf, serialized as an 8-byte unsigned little-endian integer.
-- The domain separator `b"makechain:execution-payload:v1"` prevents cross-protocol hash collisions.
+- The domain separator `b"makechain:execution-payload:v2"` prevents cross-protocol hash collisions and distinguishes version-6 payload commitments that include optional reshare data.
 
 The [`ProjectMessages`](../proto/makechain.proto) entries in `project_messages` MUST be ordered by byte-lexicographic `project_id`, matching the `BTreeMap` iteration order in the reference implementation.
 
 Persisted block verification therefore requires both the finalized [`Block`](../proto/makechain.proto) and the exact associated [`ExecutionPayload`](../proto/makechain.proto). A sync provider serving historical blocks MUST also serve that payload, and a syncing node MUST verify that the served `(Block, ExecutionPayload)` pair yields the payload digest committed by `consensus_finalization`.
 
-The `proposal_digest(R)` value is what validators sign in finalization certificates. The domain separator `b"makechain:execution-payload:v1"` serves as the commitment version identifier. Future commitment format changes MUST use a new domain separator (e.g., `v2`) and require explicit activation semantics.
+The `proposal_digest(R)` value is what validators sign in finalization certificates. The domain separator `b"makechain:execution-payload:v2"` serves as the commitment version identifier. Future commitment format changes MUST use a new domain separator (e.g., `v3`) and require explicit activation semantics.
 
-> **Protocol Versioning:** The clean-slate reset network uses a single canonical protocol rule set and a fixed transport version. `BlockHeader.version` and `ExecutionPayload.version` MUST both equal `5`. Replay, sync, and persisted-block verification MUST use the committed block contents and fixed protocol version, not any hardfork activation schedule. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check and block execution remains authoritative.
+> **Protocol Versioning:** The clean-slate reset network uses a single canonical protocol rule set and a fixed transport version. `BlockHeader.version` and `ExecutionPayload.version` MUST both equal `6`. Replay, sync, and persisted-block verification MUST use the committed block contents and fixed protocol version, not any hardfork activation schedule. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check and block execution remains authoritative.
 
 ### 8.3 Empty Blocks
 
@@ -1361,8 +1362,8 @@ Specification versions use [CalVer](https://calver.org/) (`YYYY.M.PATCH`). Each 
 
 ### 13.1 Fixed Transport Version
 
-- `BlockHeader.version = 5`
-- `ExecutionPayload.version = 5`
+- `BlockHeader.version = 6`
+- `ExecutionPayload.version = 6`
 
 `ExecutionPayload.version` MUST mirror the committed block header version. A node MUST fail closed if either field does not match the fixed protocol version required by this specification.
 
@@ -1474,7 +1475,7 @@ Block hash: `H(canonical_encode(BlockHeader))` where `canonical_encode` follows 
 The proposal digest committed by `consensus_finalization` is a domain-separated BLAKE3 hash of the canonical protobuf encoding of [`ExecutionPayload`](../proto/makechain.proto):
 
 ```
-proposal_digest(R) = H(b"makechain:execution-payload:v1" || len(wire) as uint64 LE || wire)
+proposal_digest(R) = H(b"makechain:execution-payload:v2" || len(wire) as uint64 LE || wire)
 ```
 
 where `wire = canonical_encode(ExecutionPayload_proto(R))` following the rules in B.1. The length prefix prevents ambiguity between the domain separator and the payload bytes.
@@ -1574,8 +1575,8 @@ The genesis state `σ₀` is the empty key-value store. No pre-registered accoun
 - `parent_hash = [0; 32]` (all zeros)
 - `state_root` = the merkle root of the empty store
 - `timestamp = 0`
-- `BlockHeader.version = 5`
-- `ExecutionPayload.version = 5`
+- `BlockHeader.version = 6`
+- `ExecutionPayload.version = 6`
 - No messages
 
 The persisted genesis execution payload has empty `account_messages` and empty `project_messages`.
@@ -1586,6 +1587,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.5.3 | 2026-04-23 | Bump the clean-slate transport version to `6` and commit optional DKG/reshare payloads in `ExecutionPayload.reshare`, making reshare data part of the finalized proposal digest and persisted block-payload pair. |
 | 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's usable storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
 | 2026.5.1 | 2026-04-16 | Amend MIP 5 merge-request quota semantics to use a requester-global active-entry limit plus a target-project namespace ceiling, and allow requester withdrawal of active merge requests from removed target projects while the active row still exists. |
 | 2026.5.0 | 2026-04-15 | Canonically integrate MIP 5 merge requests: add `MERGE_REQUEST_ADD` / `MERGE_REQUEST_REMOVE`, retained fork-lineage rows, merge-request quota and proof surfaces, dual close authorization, public merge-request queries, and merge-request correctness invariants. |

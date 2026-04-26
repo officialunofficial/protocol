@@ -430,6 +430,7 @@ message ExecutionPayload {
   bytes parent_hash = 6;                     // 32 bytes previous block hash
   uint32 chain_id = 7;                       // proto::Network enum value
   uint32 version = 8;                        // execution payload version
+  ResharePayload reshare = 9;                // Optional DKG/reshare data committed with the block
 }
 
 message SubblockPayload {
