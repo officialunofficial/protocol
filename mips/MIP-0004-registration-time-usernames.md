@@ -65,7 +65,7 @@ This MIP defines the canonical username model for Makechain deployments that ado
 Scope:
 
 - this MIP preserves the MIP-0003 rule that `owner_address` is the sole canonical protocol identity
-- this MIP does not reintroduce MID or any MID-scoped identity concept
+- this MIP keeps account identity address-native
 - this MIP separates raw storage funding from username lifecycle control
 - this MIP does not require a username for principal validity, only for quota-bearing use of storage-backed capacity
 

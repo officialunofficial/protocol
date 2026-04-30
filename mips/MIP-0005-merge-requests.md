@@ -757,7 +757,7 @@ Content-addressed identity:
 This MIP is considered specified when all of the following are true:
 
 1. `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE` carry canonical wire definitions at enum values `84` and `85` with oneof field numbers `96` and `97`.
-2. The proposal uses address-native semantics throughout and does not depend on MID.
+2. The proposal uses address-native semantics throughout.
 3. `MergeRequestAddBody` validates `project_id` (32 bytes), `source_project_id` (32 bytes, not equal to `project_id`), `source_ref` (1-254 bytes, no null bytes), `source_commit_hash` (32 bytes), `target_ref` (1-254 bytes, no null bytes), and `title` (1-200 UTF-8 bytes).
 4. `MergeRequestRemoveBody` validates `project_id` (32 bytes) and `request_id` (32 bytes).
 5. `MERGE_REQUEST_ADD` requires `SIGNING` scope, with no membership requirement for public targets, `READ+` for private targets, and `READ+` for private source projects unless the requester is the source owner.
