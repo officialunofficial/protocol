@@ -256,7 +256,7 @@ graph LR
     style W fill:#4a3b6b,color:#fff
 ```
 
-`owner_address` is the sole canonical account identifier in V2. MID does not exist in post-reset semantics.
+`owner_address` is the sole canonical account identifier in V2.
 
 Any valid 20-byte address is a valid Makechain principal even if it has no persisted account row, no delegated keys, and no active storage grants. Missing account state implies default-zero bookkeeping, not invalid identity.
 
