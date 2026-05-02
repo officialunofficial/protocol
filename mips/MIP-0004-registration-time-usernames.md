@@ -444,7 +444,7 @@ The public account surface MUST expose the canonical username separately from mu
 
 The canonical protobuf surface includes:
 
-- `GetAccountResponse.username = 21`
+- `GetAccountResponse.username = 20`
 - `GetAccountResponse.storage_units` as raw active storage grants
 - `GetAccountResponse.max_*` quota fields derived from username-gated usable quota
 

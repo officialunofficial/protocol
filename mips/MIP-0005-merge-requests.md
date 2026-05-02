@@ -57,8 +57,8 @@ Two new enum values are added to `MessageType` in `proto/makechain.proto`:
 
 ```protobuf
 // 2P: Merge request set (content-addressed)
-MESSAGE_TYPE_MERGE_REQUEST_ADD    = 84;
-MESSAGE_TYPE_MERGE_REQUEST_REMOVE = 85;
+MESSAGE_TYPE_MERGE_REQUEST_ADD    = 23;
+MESSAGE_TYPE_MERGE_REQUEST_REMOVE = 24;
 ```
 
 #### 2.2 MessageData body
@@ -66,8 +66,8 @@ MESSAGE_TYPE_MERGE_REQUEST_REMOVE = 85;
 Two new oneof variants are added to the `body` field of `MessageData`:
 
 ```protobuf
-MergeRequestAddBody    merge_request_add    = 96;
-MergeRequestRemoveBody merge_request_remove = 97;
+MergeRequestAddBody    merge_request_add    = 27;
+MergeRequestRemoveBody merge_request_remove = 28;
 ```
 
 #### 2.3 MergeRequestAddBody

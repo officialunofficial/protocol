@@ -153,16 +153,16 @@ For MIP 4 deployments, the canonical protobuf additions are:
 ```proto
 message MessageData {
   oneof body {
-    StorageClaimBody storage_claim = 72;
-    UsernameCreateBody username_create = 73;
-    UsernameUpdateBody username_update = 74;
+    StorageClaimBody storage_claim = 18;
+    UsernameCreateBody username_create = 19;
+    UsernameUpdateBody username_update = 20;
   }
 }
 
 enum MessageType {
-  MESSAGE_TYPE_STORAGE_CLAIM = 72;
-  MESSAGE_TYPE_USERNAME_CREATE = 73;
-  MESSAGE_TYPE_USERNAME_UPDATE = 74;
+  MESSAGE_TYPE_STORAGE_CLAIM = 16;
+  MESSAGE_TYPE_USERNAME_CREATE = 17;
+  MESSAGE_TYPE_USERNAME_UPDATE = 18;
 }
 ```
 
@@ -627,7 +627,7 @@ All committed V2 block messages are user-submitted envelope-bearing messages. Th
 - `SIGNER_ADD` and `SIGNER_REMOVE` bypass delegated-key lookup; authority derives exclusively from valid custody signatures verified against `owner_address`.
 - `STORAGE_CLAIM` bypasses delegated-key lookup; authority derives exclusively from finalized settlement verification plus claim-marker idempotence.
 
-Disabled relay-era families (`KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, `RELAY_SIGNER_REMOVE`) are invalid in V2 and MUST be rejected at all external ingress points and during replay.
+Pre-V2 relay-era families (`KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, `RELAY_SIGNER_REMOVE`) are not defined in the V2 protobuf. Any message bearing one of these legacy type values MUST fail structural validation as an invalid `MessageType`.
 
 ### 5.4A `STORAGE_CLAIM` Authorization
 
@@ -1124,7 +1124,7 @@ Pending messages are held in a mempool with:
 - Separation of account vs. project messages for the two-phase execution model.
 - Network validation (reject messages for wrong network).
 - Timestamp validation (reject future messages; reject stale storage-sensitive messages).
-- Disabled-message rejection (removed relay-era families MUST be rejected from external submission, P2P gossip, replay, and block execution).
+- Structural `MessageType` validation rejects undefined or pre-V2 legacy type values from external submission, P2P gossip, replay, and block execution.
 
 ---
 
