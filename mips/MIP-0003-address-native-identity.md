@@ -84,19 +84,18 @@ Address-native principal validity applies even before state materialization. Any
 
 `MessageData.mid` MUST be removed from the post-reset message model and replaced with `owner_address`.
 
-Recommended protobuf shape:
+Canonical protobuf shape (V2 reset, contiguous numbering):
 
 ```proto
 message MessageData {
   MessageType type = 1;
-  reserved 2;              // was mid
-  uint32 timestamp = 3;
-  Network network = 4;
-  bytes owner_address = 5; // 20 bytes
+  uint32 timestamp = 2;
+  Network network = 3;
+  bytes owner_address = 4; // 20 bytes
 
   oneof body {
     ...
-    StorageClaimBody storage_claim = 98;
+    StorageClaimBody storage_claim = 18;
   }
 }
 ```
@@ -117,41 +116,40 @@ Migration rules:
 
 - implementations MUST NOT change an existing `uint64 mid` field into `bytes owner_address` at the same field number
 - old MID-typed field numbers SHOULD be reserved
-- new address-native fields SHOULD use fresh field numbers
-- relay-driven legacy message types MAY remain decodeable during implementation transition, but they MUST be invalid under address-native version rules
-- block-level Tempo checkpoint semantics MUST be removed for the address-native variant
+- new address-native fields use fresh field numbers
+- pre-V2 relay-driven message types are not defined in V2 protobuf and MUST fail structural validation
+- block-level Tempo checkpoint semantics are removed for the address-native variant
 
-Recommended wire diff in `proto/makechain.proto`:
+Canonical wire layout in `proto/makechain.proto` (V2 reset, no preserved field assignments):
 
 ```proto
 message MessageData {
   MessageType type = 1;
-  reserved 2;              // was mid
-  uint32 timestamp = 3;
-  Network network = 4;
-  bytes owner_address = 5; // 20 bytes
+  uint32 timestamp = 2;
+  Network network = 3;
+  bytes owner_address = 4; // 20 bytes
   oneof body {
     ...
-    StorageClaimBody storage_claim = 98;
+    StorageClaimBody storage_claim = 18;
   }
 }
 
 enum MessageType {
   ...
-  MESSAGE_TYPE_STORAGE_RENT = 71;   // invalid on address-native networks
-  MESSAGE_TYPE_STORAGE_CLAIM = 72;
+  MESSAGE_TYPE_STORAGE_CLAIM = 16;
 }
 ```
 
 Required notes:
 
-- `StorageClaimBody` MUST use a fresh oneof tag instead of overloading `storage_rent = 81`
-- `MESSAGE_TYPE_STORAGE_RENT = 71` MAY remain defined for transition safety, but it MUST be rejected on address-native networks
-- `KEY_ADD`, `OWNERSHIP_TRANSFER`, `RELAY_SIGNER_ADD`, and `RELAY_SIGNER_REMOVE` MAY remain reserved or decode-only, but they MUST be rejected by post-reset version rules
+- `StorageClaimBody` uses a fresh oneof tag; the legacy `storage_rent` body assignment is not present in V2.
+- Pre-V2 message types (`KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, `RELAY_SIGNER_REMOVE`) are not defined in V2 protobuf. Any message bearing one of these legacy type values MUST fail structural `MessageType` validation.
 
 #### 3.3 Body-level identity rewrites
 
 All protocol-visible MID references MUST become address-based.
+
+> Note: The migration tables in sections 3.3 – 3.5 describe the original MIP-3 enactment renumbering (V1 → MIP-3). V2 has since been further compacted to contiguous field numbering with no `reserved` declarations. See `proto/makechain.proto` for the current canonical wire layout.
 
 This includes at minimum:
 
@@ -175,23 +173,21 @@ Recommended field migrations:
 | `LinkRemoveBody` | `uint64 target_mid = 2` | reserve field 2 in `oneof target` | `bytes target_owner_address = 4` |
 | `SignerAddBody` | `uint64 request_mid = 8` | reserve field 8 | `bytes request_owner_address = 13` |
 
-Recommended `SignerAddBody` shape:
+Canonical `SignerAddBody` shape (V2 reset, contiguous numbering):
 
 ```proto
 message SignerAddBody {
   bytes key = 1;
   uint32 scope = 2;
   bytes custody_signature = 3;
-  reserved 4;
-  repeated bytes allowed_projects = 5;
-  uint32 custody_key_type = 6;
-  uint64 nonce = 7;
-  reserved 8;                        // was request_mid
-  bytes request_signature = 9;
-  uint32 request_key_type = 10;
-  uint64 valid_after = 11;
-  uint64 valid_before = 12;
-  bytes request_owner_address = 13;  // 20 bytes
+  repeated bytes allowed_projects = 4;
+  uint32 custody_key_type = 5;
+  uint64 nonce = 6;
+  bytes request_signature = 7;
+  uint32 request_key_type = 8;
+  uint64 valid_after = 9;
+  uint64 valid_before = 10;
+  bytes request_owner_address = 11;  // 20 bytes
 }
 ```
 
@@ -271,9 +267,9 @@ The post-reset identity and storage message set MUST include:
 
 All other user message families remain conceptually available, but they MUST use address-native identity fields.
 
-#### 4.2 Disabled current relay-driven message types
+#### 4.2 Removed pre-V2 relay-driven message types
 
-The following current protocol message types MUST be rejected on address-native networks:
+The following pre-V2 message types are not defined in the V2 protobuf:
 
 - `KEY_ADD`
 - `OWNERSHIP_TRANSFER`
@@ -281,7 +277,7 @@ The following current protocol message types MUST be rejected on address-native 
 - `RELAY_SIGNER_ADD`
 - `RELAY_SIGNER_REMOVE`
 
-Historical enum values MAY remain decodeable during implementation transition, but they MUST be invalid under post-reset version rules.
+Any message bearing one of these legacy type values MUST fail structural `MessageType` validation.
 
 ### 5. `STORAGE_CLAIM`
 
