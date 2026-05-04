@@ -8,7 +8,7 @@
 
 A specialized protocol built for making things.
 
-**Version:** 2026.5.2
+**Version:** 2026.5.4
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every committed message is verifiable from canonical state and, where applicable, finalized message-local external evidence.
 
@@ -680,7 +680,7 @@ authorize_signer_op(σ, data, body) → Ok | Err:
 
 **EIP-712 Domain:** `{ name: "Makechain", version: "1", chainId: host_chain_id(data.network) }`
 
-`host_chain_id(network)` is the canonical [EIP-155][eip155] chain ID of the Tempo settlement chain bound to that Makechain network. The EIP-712 domain MUST use that chain ID so wallet signing, settlement verification, and historical ERC-1271 checks all bind to the same finalized Tempo chain.
+`host_chain_id(network)` is the canonical [EIP-155][eip155] chain ID of the Tempo settlement chain bound to that Makechain network. The EIP-712 domain MUST use that chain ID so wallet signing, settlement verification, and historical stateful signature checks all bind to the same finalized Tempo chain.
 
 Current deployments:
 - `devnet` → `42431` (Tempo Moderato)
@@ -695,7 +695,7 @@ SignerAdd(address owner, bytes32 key, uint32 scope, uint64 validAfter,
           uint64 validBefore, uint64 nonce, bytes32[] allowedProjects, uint32 network)
 ```
 
-For `custody_key_type = 3`, the typed payload is:
+For `custody_key_type = 3` or `custody_key_type = 4`, the typed payload is:
 ```
 SignerAddContract(address owner, bytes32 key, uint32 scope, uint64 validAfter,
                   uint64 validBefore, uint64 nonce, bytes32[] allowedProjects,
@@ -708,7 +708,7 @@ SignerRemove(address owner, bytes32 key, uint64 validAfter,
              uint64 validBefore, uint64 nonce, uint32 network)
 ```
 
-For `custody_key_type = 3`, the typed payload is:
+For `custody_key_type = 3` or `custody_key_type = 4`, the typed payload is:
 ```
 SignerRemoveContract(address owner, bytes32 key, uint64 validAfter,
                      uint64 validBefore, uint64 nonce, uint32 network,
@@ -723,13 +723,14 @@ SignerRemoveContract(address owner, bytes32 key, uint64 validAfter,
 | 1 | P256 (ECDSA) | `r:32 \| s:32 \| v:1` | 65 bytes |
 | 2 | WebAuthn (P256) | Variable-length envelope | 107–2048 bytes |
 | 3 | ERC-1271 | Opaque contract-defined bytes plus companion `custody_block_hash` | 0–8192 bytes |
+| 4 | Tempo Access Key | `0x03 \| root_account:20 \| inner_signature` plus companion `custody_block_hash` | 86–2070 bytes |
 
 - `valid_after` / `valid_before` bound [`MessageData.timestamp`](../proto/makechain.proto).
 - `nonce` MUST match the account's current `custody_nonce` for `owner_address`.
 - `allowedProjects` binds the key's project allowlist into the `SignerAdd` signature, preventing allowlist manipulation before finalization.
 - `network` binds the signature to [`MessageData.network`](../proto/makechain.proto), preventing cross-network replay.
 - The EIP-712 domain `chainId` MUST equal `host_chain_id(data.network)`.
-- `custody_block_hash` MUST be present and exactly 32 bytes iff `custody_key_type = 3`, and MUST identify a finalized canonical Tempo block on `host_chain_id(data.network)`.
+- `custody_block_hash` MUST be present and exactly 32 bytes iff `custody_key_type` is `3` or `4`, and MUST identify a finalized canonical Tempo block on `host_chain_id(data.network)`.
 
 **[WebAuthn][webauthn] Envelope Wire Format (custody_key_type=2):**
 ```
@@ -740,6 +741,13 @@ SignerRemoveContract(address owner, bytes32 key, uint64 validAfter,
 - `clientDataJSON` — MUST contain `"type": "webauthn.get"`, a `"challenge"` that is the base64url encoding of the EIP-712 signing hash, and a canonical secure `"origin"`. `crossOrigin` MUST be absent or `false`.
 - `sig` — Raw P256 ECDSA (`r:32 | s:32`, low-S normalized).
 - `v` — Recovery ID hint (0 or 1); values > 1 are rejected.
+
+**Tempo Access Key Wire Format (key_type=4):**
+```
+0x03 | root_account:20 | inner_signature
+```
+
+`root_account` MUST equal the expected authority for the signature surface: `MessageData.owner_address` for custody signatures, `request_owner_address` for app-attribution signatures, and the claimed `ETH_ADDRESS` address for verification claims. `inner_signature` MUST be a Tempo primitive signature accepted by the TIP-1020 signature verifier precompile. Validators MUST recover the access-key `keyId` by historical `eth_call` to TIP-1020 at `validationBlockHash`, then validate the recovered `keyId` against AccountKeychain state at the same block hash. The AccountKeychain key MUST exist, MUST NOT be revoked, MUST NOT be expired at the validation block timestamp, and MUST have a signature type matching `inner_signature`. Spending limits and call scopes are Tempo transaction-execution restrictions and MUST NOT be evaluated for Makechain signature validation.
 
 ### 5.6 App Attribution
 
@@ -753,7 +761,7 @@ Every `SIGNER_ADD` MUST include app attribution:
 SignerRequest(address requestOwner, bytes32 key, uint64 validAfter, uint64 validBefore, uint32 network)
 ```
 
-For `request_key_type = 3`, the typed payload is:
+For `request_key_type = 3` or `request_key_type = 4`, the typed payload is:
 ```
 SignerRequestContract(address requestOwner, bytes32 key, uint64 validAfter,
                       uint64 validBefore, uint32 network, bytes32 validationBlockHash)
@@ -763,7 +771,7 @@ Verifiers MUST verify `request_signature` over `SignerRequest` directly against 
 
 For self-request, `request_owner_address = owner_address` and the same wallet signs both custody and app-attribution signatures.
 
-`request_block_hash` MUST be present and exactly 32 bytes iff `request_key_type = 3`, and MUST identify a finalized canonical Tempo block on `host_chain_id(data.network)`.
+`request_block_hash` MUST be present and exactly 32 bytes iff `request_key_type` is `3` or `4`, and MUST identify a finalized canonical Tempo block on `host_chain_id(data.network)`.
 
 ### 5.7 Custody Nonce Sharing
 
@@ -775,6 +783,7 @@ Recovered wallet addresses are signature-family specific:
 
 - secp256k1 uses standard Ethereum address derivation from the recovered uncompressed public key
 - P256 and WebAuthn P256 use Tempo address derivation `keccak256(pub_key_x || pub_key_y)[12:32]`
+- Tempo Access Key validation recovers the access-key `keyId` from the inner Tempo primitive signature, then validates that key against the expected root account's historical AccountKeychain state
 
 P256 and WebAuthn therefore share the same 20-byte address space for the same underlying P256 keypair.
 
@@ -994,11 +1003,11 @@ These checks require no state lookups and MUST be performed before any state acc
 | `FORK` | `source_project_id`: 32 bytes; `source_commit_hash`: 32 bytes; `name`: 1-100 chars; `visibility`: valid enum |
 | `COLLABORATOR_ADD` | `project_id`: 32 bytes; `target_owner_address`: 20 bytes; `permission`: valid enum |
 | `COLLABORATOR_REMOVE` | `project_id`: 32 bytes; `target_owner_address`: 20 bytes |
-| `VERIFICATION_ADD` | `type ≠ NONE`; `address`: 1-128 bytes; for `ETH_ADDRESS`, `address` is raw 20-byte address bytes and `chain_id` is the minimal unsigned big-endian encoding of `host_chain_id(network)`; for `SOL_ADDRESS`, `address` is the raw 32-byte Ed25519 public key and `chain_id` is empty; `claim_signature`: 1-2048 bytes for key types 0/1/2 or 0-8192 bytes for key type 3; `claim_key_type`: 0-3 for `ETH_ADDRESS`; `claim_key_type` is zero/omitted for `SOL_ADDRESS`; `claim_block_hash`: exactly 32 bytes iff `claim_key_type = 3` |
+| `VERIFICATION_ADD` | `type ≠ NONE`; `address`: 1-128 bytes; for `ETH_ADDRESS`, `address` is raw 20-byte address bytes and `chain_id` is the minimal unsigned big-endian encoding of `host_chain_id(network)`; for `SOL_ADDRESS`, `address` is the raw 32-byte Ed25519 public key and `chain_id` is empty; `claim_signature`: 1-2048 bytes for key types 0/1/2, 0-8192 bytes for key type 3, or 86-2070 bytes for key type 4; `claim_key_type`: 0-4 for `ETH_ADDRESS`; `claim_key_type` is zero/omitted for `SOL_ADDRESS`; `claim_block_hash`: exactly 32 bytes iff `claim_key_type` is 3 or 4 |
 | `VERIFICATION_REMOVE` | `address`: 1-128 bytes |
 | `LINK_ADD/REMOVE` | `type ≠ NONE`; exactly one target set; target matches type; FOLLOW: `target_owner_address`: 20 bytes; STAR: `target_project_id`: 32 bytes |
-| `SIGNER_ADD` | `key`: 32 bytes; valid scope; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 3; `custody_block_hash`: exactly 32 bytes iff `custody_key_type = 3`; `request_owner_address`: 20 bytes; request sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `request_key_type` ≤ 3; `request_block_hash`: exactly 32 bytes iff `request_key_type = 3`; `allowed_projects`: max 100 entries, each 32 bytes (agent scope only) |
-| `SIGNER_REMOVE` | `key`: 32 bytes; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 3; `custody_block_hash`: exactly 32 bytes iff `custody_key_type = 3` |
+| `SIGNER_ADD` | `key`: 32 bytes; valid scope; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), 0-8192 bytes (type 3), or 86-2070 bytes (type 4); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 4; `custody_block_hash`: exactly 32 bytes iff `custody_key_type` is 3 or 4; `request_owner_address`: 20 bytes; request sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), 0-8192 bytes (type 3), or 86-2070 bytes (type 4); `request_key_type` ≤ 4; `request_block_hash`: exactly 32 bytes iff `request_key_type` is 3 or 4; `allowed_projects`: max 100 entries, each 32 bytes (agent scope only) |
+| `SIGNER_REMOVE` | `key`: 32 bytes; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), 0-8192 bytes (type 3), or 86-2070 bytes (type 4); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 4; `custody_block_hash`: exactly 32 bytes iff `custody_key_type` is 3 or 4 |
 | `REACTION_ADD/REMOVE` | `type ≠ NONE`; `target_project_id`: 32 bytes; `target_commit_hash`: 32 bytes |
 | `STORAGE_CLAIM` | `owner_address`: 20 bytes; `actor`: 20 bytes; `units > 0`; `settlement_tx_hash`: 32 bytes; `settlement_chain_id = host_chain_id(network)` |
 | `USERNAME_CREATE` | `username` MUST already be canonical lowercase ASCII and match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
@@ -1017,9 +1026,9 @@ These checks require state lookups:
 - **`PROJECT_REMOVE`:** Signer must be the project's canonical owner (`project.owner_address == data.owner_address`).
 - **`PROJECT_ARCHIVE`:** Signer must be the project's canonical owner (`project.owner_address == data.owner_address`).
 - **`PROJECT_CREATE`:** Account has available usable storage capacity; name is unique within owner's namespace.
-- **`VERIFICATION_ADD`:** `claim_signature` is valid for the given address, type, and network. For `ETH_ADDRESS`, `VerificationAddBody.chain_id` MUST equal the minimal unsigned big-endian encoding of `host_chain_id(MessageData.network)`. For `SOL_ADDRESS`, `VerificationAddBody.chain_id` MUST be empty. If `claim_key_type = 3`, verification MUST use ERC-1271 on `host_chain_id(MessageData.network)` pinned to `claim_block_hash`.
+- **`VERIFICATION_ADD`:** `claim_signature` is valid for the given address, type, and network. For `ETH_ADDRESS`, `VerificationAddBody.chain_id` MUST equal the minimal unsigned big-endian encoding of `host_chain_id(MessageData.network)`. For `SOL_ADDRESS`, `VerificationAddBody.chain_id` MUST be empty. If `claim_key_type = 3`, verification MUST use ERC-1271 on `host_chain_id(MessageData.network)` pinned to `claim_block_hash`. If `claim_key_type = 4`, verification MUST use Tempo Access Key validation pinned to `claim_block_hash`, with the claimed `address` as the expected root account.
 - **`LINK_ADD`:** FOLLOW target must be a valid `owner_address`; STAR target must exist and not be removed.
-- **`SIGNER_ADD/REMOVE`:** See Section 5.5. `SIGNER_ADD` MUST also satisfy the app-attribution checks in Section 5.6. If `custody_key_type = 3` or `request_key_type = 3`, the referenced block hash MUST identify a finalized canonical Tempo block on `host_chain_id(MessageData.network)`.
+- **`SIGNER_ADD/REMOVE`:** See Section 5.5. `SIGNER_ADD` MUST also satisfy the app-attribution checks in Section 5.6. If `custody_key_type` or `request_key_type` is `3` or `4`, the referenced block hash MUST identify a finalized canonical Tempo block on `host_chain_id(MessageData.network)`.
 - **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
 - **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op. Otherwise claimant expired storage grants MUST be swept at `MessageData.timestamp`, the raw storage grant MUST be added, and cached `AccountState.storage_units` MUST be refreshed. `STORAGE_CLAIM` does not assign or update usernames.
@@ -1138,6 +1147,7 @@ Tempo integration is message-local only:
 
 1. `STORAGE_CLAIM` verification fetches finalized settlement evidence for a specific claim.
 2. ERC-1271 verification, where supported, uses finalized historical Tempo state pinned by `blockHash` for the specific signature being verified.
+3. Tempo Access Key verification, where supported, uses finalized historical Tempo AccountKeychain and TIP-1020 precompile state pinned by `blockHash` for the specific signature being verified.
 
 No block-global checkpoint or Tempo frontier is committed, replayed, or published into consensus state.
 
@@ -1164,7 +1174,7 @@ Persisted-block replay verification is tri-state:
 - `Invalid` — the stored history is contradictory or malformed and must fail closed
 - `NotYetVerifiable` — the block is structurally sound, but required finalized external evidence is not currently available locally or via configured RPC access
 
-Replay verification is message-local in V2. It applies only to message families that require external evidence, such as `STORAGE_CLAIM` settlement verification or ERC-1271 historical verification.
+Replay verification is message-local in V2. It applies only to message families that require external evidence, such as `STORAGE_CLAIM` settlement verification, ERC-1271 historical verification, or Tempo Access Key historical verification.
 
 Disabled relay-era message families remain invalid during replay and fail closed immediately.
 
@@ -1187,13 +1197,27 @@ Existing `GetHealth.ready` / `/readyz` semantics are preserved: `ready` still me
 
 Replay-sensitive surfaces MUST still fail closed until replay verification is `VERIFIED`. This includes verified sync-target acquisition, verified snapshot or archive export, and snapshot-fence-backed `GetSnapshotInfo` responses.
 
+### 9.5A Stateful Historical Signature Verification
+
+Stateful historical signature verification covers ERC-1271 (`key_type = 3`) and Tempo Access Key (`key_type = 4`) signatures. Both families are message-local and pinned by a signature-specific `blockHash` carried in the message body and bound into the EIP-712 typed payload as `validationBlockHash`.
+
+For Tempo Access Key signatures, validators MUST evaluate all historical RPC calls at the same `validationBlockHash`:
+
+1. parse `signature = 0x03 || root_account || inner_signature`
+2. require `root_account` matches the expected authority for the surface being verified
+3. recover `keyId` by historical `eth_call` to `TIP1020.recover(signing_hash, inner_signature)`
+4. fetch `KeyInfo` by historical `eth_call` to `AccountKeychain.getKey(root_account, keyId)`
+5. require `KeyInfo.keyId = keyId`, `KeyInfo.isRevoked = false`, `validation_block_timestamp < KeyInfo.expiry`, and `KeyInfo.signatureType` matches `inner_signature`
+
+TIP-1020 MUST receive the inner primitive signature, not the outer Keychain signature, because TIP-1020 rejects Keychain signatures by design. Spending limits and call scopes are Tempo transaction-execution restrictions and are not evaluated for Makechain signatures. Any active, unrevoked, unexpired Tempo Access Key for the expected root account is accepted.
+
 ### 9.6 Verification Claims
 
-**ETH_ADDRESS** — EIP-712 typed-data signature proving control of the exact claimed Ethereum address. The signer may be a secp256k1 EOA, a raw P256 signer, a WebAuthn P256 passkey, or an ERC-1271 contract on `host_chain_id(network)`:
+**ETH_ADDRESS** — EIP-712 typed-data signature proving control of the exact claimed Ethereum address. The signer may be a secp256k1 EOA, a raw P256 signer, a WebAuthn P256 passkey, an ERC-1271 contract on `host_chain_id(network)`, or a Tempo Access Key authorized by the claimed address:
 ```
 VerificationClaim(address owner, address ethAddress, uint256 chainId, uint32 verificationType, string network)
 ```
-For `claim_key_type = 3`, the typed payload is:
+For `claim_key_type = 3` or `claim_key_type = 4`, the typed payload is:
 ```
 VerificationClaimContract(address owner, address ethAddress, uint256 chainId,
                           uint32 verificationType, string network,
@@ -1203,7 +1227,7 @@ Domain: `{ name: "Makechain", version: "1", chainId: host_chain_id(network) }`.
 
 For `ETH_ADDRESS`, both the typed-data field `VerificationClaim.chainId` and the wire field [`VerificationAddBody.chain_id`](../proto/makechain.proto) MUST equal `host_chain_id(MessageData.network)`. On the wire, `VerificationAddBody.chain_id` MUST use the minimal unsigned big-endian byte encoding of that host-chain ID. A verifier MUST reject the claim if either value does not match the canonical host-chain ID for the Makechain network.
 
-If `claim_key_type = 3`, `claim_block_hash` MUST be exactly 32 bytes, MUST identify a finalized canonical Tempo block on `host_chain_id(MessageData.network)`, and MUST be bound into the signed payload.
+If `claim_key_type` is `3` or `4`, `claim_block_hash` MUST be exactly 32 bytes, MUST identify a finalized canonical Tempo block on `host_chain_id(MessageData.network)`, and MUST be bound into the signed payload. For `claim_key_type = 4`, the Tempo Access Key root account embedded in the signature MUST equal the claimed `ethAddress`.
 
 **SOL_ADDRESS** — Ed25519 signature over `"makechain:verify:<network>:<owner_address_hex>"`. On the wire, the verification address MUST be the raw 32-byte Ed25519 public key and `VerificationAddBody.chain_id` MUST be empty.
 
@@ -1398,6 +1422,7 @@ Replay and sync operate entirely within the post-reset history and canonical rul
 | `MAX_URL_LEN` | 2,048 bytes | Maximum content URL length |
 | `MAX_CLAIM_SIGNATURE_LEN` | 2,048 bytes | Maximum verification claim signature for key types 0/1/2 |
 | `MAX_CONTRACT_SIGNATURE_LEN` | 8,192 bytes | Maximum ERC-1271 signature payload |
+| `MAX_TEMPO_ACCESS_KEY_SIGNATURE_LEN` | 2,070 bytes | Maximum Tempo Access Key signature payload |
 | `MAX_ADDRESS_LEN` | 128 bytes | Maximum verification address length |
 | `MAX_CHAIN_ID_LEN` | 32 bytes | Maximum verification chain ID length |
 | `MEMPOOL_CAPACITY` | 100,000 | Default mempool capacity |
@@ -1421,6 +1446,15 @@ Replay and sync operate entirely within the post-reset history and canonical rul
 | `QMDB_KEY_SIZE` | 289 bytes | Fixed key size (287 usable + 2-byte length footer) |
 | `SIMPLEX_NAMESPACE` | `b"makechain-v0"` | Simplex BFT namespace for finalization certificates |
 
+### Tempo Signature Precompile Mapping
+
+The following Tempo precompile addresses are consensus-critical for Tempo Access Key historical verification.
+
+| Name | Address | Usage |
+|------|---------|-------|
+| `AccountKeychain` | `0xAAAAAAAA00000000000000000000000000000000` | Historical access-key state lookup |
+| `TIP1020 SignatureVerifier` | `0x5165300000000000000000000000000000000000` | Historical inner-signature recovery |
+
 ### Settlement Contract Mapping
 
 The per-network `settlement_contract_address(network)` and `settlement_finality_depth(network)` constants are consensus-critical for `STORAGE_CLAIM` verification.
@@ -1439,7 +1473,7 @@ The canonical wire format for all protocol messages is [Protocol Buffers v3][pro
 
 ### B.1 Canonical Encoding Rules
 
-The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. For `2026.5.2`, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
+The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. For `2026.5.4`, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
 
 The reference encoding follows these rules:
 
@@ -1490,6 +1524,7 @@ Tempo dependencies are message-local only:
 
 - `STORAGE_CLAIM` verifies finalized settlement-chain evidence for a specific claim.
 - ERC-1271 verification performs finalized historical `eth_call` by `blockHash` on `host_chain_id(network)`.
+- Tempo Access Key verification performs finalized historical `eth_call` by `blockHash` to AccountKeychain and TIP-1020 on `host_chain_id(network)`.
 
 Any deployment-specific settlement or wallet-integration contracts remain operational details rather than canonical Makechain message sources.
 
@@ -1587,6 +1622,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.5.4 | 2026-05-04 | Integrate MIP 6 Tempo Access Key signature validation on the existing ERC-1271 historical-validation surfaces, adding key type `4`, historical AccountKeychain and TIP-1020 checks, and stateful block-hash pinning semantics. |
 | 2026.5.3 | 2026-04-23 | Bump the clean-slate transport version to `6` and commit optional DKG/reshare payloads in `ExecutionPayload.reshare`, making reshare data part of the finalized proposal digest and persisted block-payload pair. |
 | 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's usable storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
 | 2026.5.1 | 2026-04-16 | Amend MIP 5 merge-request quota semantics to use a requester-global active-entry limit plus a target-project namespace ceiling, and allow requester withdrawal of active merge requests from removed target projects while the active row still exists. |
@@ -1617,6 +1653,8 @@ Validator identity is configured out-of-band via node configuration, not via gen
 [protobuf]: https://protobuf.dev/programming-guides/proto3/
 [webauthn]: https://www.w3.org/TR/webauthn-3/
 [prost]: https://github.com/tokio-rs/prost
+[tempo-account-keychain]: https://docs.tempo.xyz/protocol/transactions/AccountKeychain
+[tip1020]: https://docs.tempo.xyz/protocol/tips/tip-1020
 
 | Label | Reference |
 |-------|-----------|
@@ -1632,3 +1670,5 @@ Validator identity is configured out-of-band via node configuration, not via gen
 | Protocol Buffers | Google, "Protocol Buffers v3 Language Guide." |
 | WebAuthn | W3C, "Web Authentication: An API for accessing Public Key Credentials," Level 3. |
 | prost | tokio-rs, "Protocol Buffers implementation for Rust." |
+| Tempo AccountKeychain | Tempo, "Account Keychain Precompile." |
+| TIP-1020 | Tempo, "Signature Verification Precompile." |

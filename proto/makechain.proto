@@ -277,8 +277,8 @@ message VerificationAddBody {
   bytes address                      = 2;  // External address/identifier (e.g. 20-byte Ethereum address)
   bytes claim_signature              = 3;  // Signature from the external key proving ownership
   bytes chain_id                     = 4;  // Chain identifier (e.g. 1 = Ethereum mainnet, 10 = Optimism)
-  uint32 claim_key_type              = 5;
-  bytes claim_block_hash             = 6;
+  uint32 claim_key_type              = 5;  // ETH_ADDRESS only: 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271, 4 = Tempo Access Key
+  bytes claim_block_hash             = 6;  // Required iff claim_key_type is 3 or 4, exactly 32 bytes
 }
 
 message VerificationRemoveBody {
@@ -369,25 +369,25 @@ message SignerAddBody {
   uint32 scope = 2;                     // KeyScope: 0 = Owner, 1 = Signing, 2 = Agent
   bytes custody_signature = 3;          // EIP-712 signature: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
   repeated bytes allowed_projects = 4;  // Agent scope: project IDs (32 bytes each)
-  uint32 custody_key_type = 5;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271
+  uint32 custody_key_type = 5;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271, 4 = Tempo Access Key
   uint64 nonce = 6;                     // Must match account custody_nonce (replay protection)
   bytes request_signature = 7;         // EIP-712 SignerRequest sig from app's owner_address: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
-  uint32 request_key_type = 8;        // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271
+  uint32 request_key_type = 8;        // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271, 4 = Tempo Access Key
   uint64 valid_after = 9;             // Earliest unix timestamp accepted for this authorization
   uint64 valid_before = 10;             // Latest unix timestamp accepted for this authorization
   bytes request_owner_address = 11;    // 20-byte owner address of requesting app when known
-  bytes custody_block_hash = 12;       // Required iff custody_key_type == 3, exactly 32 bytes
-  bytes request_block_hash = 13;       // Required iff request_key_type == 3, exactly 32 bytes
+  bytes custody_block_hash = 12;       // Required iff custody_key_type is 3 or 4, exactly 32 bytes
+  bytes request_block_hash = 13;       // Required iff request_key_type is 3 or 4, exactly 32 bytes
 }
 
 message SignerRemoveBody {
   bytes key = 1;                        // Ed25519 public key to remove, 32 bytes
   bytes custody_signature = 2;          // EIP-712 signature: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
-  uint32 custody_key_type = 3;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271
+  uint32 custody_key_type = 3;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271, 4 = Tempo Access Key
   uint64 nonce = 4;                     // Must match account custody_nonce (replay protection)
   uint64 valid_after = 5;               // Earliest unix timestamp accepted for this authorization
   uint64 valid_before = 6;              // Latest unix timestamp accepted for this authorization
-  bytes custody_block_hash = 7;         // Required iff custody_key_type == 3, exactly 32 bytes
+  bytes custody_block_hash = 7;         // Required iff custody_key_type is 3 or 4, exactly 32 bytes
 }
 
 // ============================================================
