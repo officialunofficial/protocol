@@ -11,5 +11,6 @@ Current proposals:
 - [MIP-0003](./MIP-0003-address-native-identity.md) - Address-Native Identity and Removal of MID
 - [MIP-0004](./MIP-0004-registration-time-usernames.md) - Registration-Time Usernames for Address-Native Accounts
 - [MIP-0005](./MIP-0005-merge-requests.md) - Merge Requests for Cross-Project Contribution Proposals
+- [MIP-0006](./MIP-0006-tempo-access-key-signature-validation.md) - Tempo Access Key Signature Validation
 
 The MIP process is defined by [MIP-0001](./MIP-0001-mip-process.md).
