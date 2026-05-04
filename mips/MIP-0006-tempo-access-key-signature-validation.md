@@ -105,10 +105,11 @@ This binding prevents validators from selecting a different historical Tempo sta
 
 Tempo Access Key verification is message-local external evidence. It MUST be evaluated against the finalized Tempo block identified by the corresponding `*_block_hash`.
 
-Given `hash`, `signature`, `expected_root_account`, and `validation_block_hash`, validation is:
+Given `network`, `hash`, `signature`, `expected_root_account`, and `validation_block_hash`, validation is:
 
 ```text
-verify_tempo_access_key(hash, signature, expected_root_account, validation_block_hash) -> Ok | Err:
+verify_tempo_access_key(network, hash, signature, expected_root_account, validation_block_hash) -> Ok | Err:
+  require signature length is 86..=2070
   parse signature as 0x03 || root_account || inner_signature
   require root_account = expected_root_account
   require validation_block_hash identifies a finalized canonical Tempo block on host_chain_id(network)
@@ -130,7 +131,26 @@ All historical calls MUST be evaluated at the same `validation_block_hash`.
 
 TIP-1020 rejects Keychain signatures directly, so validators MUST pass only `inner_signature` to TIP-1020. AccountKeychain state validation and primitive signature recovery are separate steps.
 
+`inner_signature` MUST be a TIP-1020 primitive signature with one of these encodings:
+
+| Inner signature type | Encoding | Length | AccountKeychain `signatureType` |
+|----------------------|----------|--------|----------------------------------|
+| secp256k1 | `r || s || v` | `65` | `0` |
+| P256 | `0x01 || r || s || x || y || prehash` | `130` | `1` |
+| WebAuthn | `0x02 || webauthn_data || r || s || x || y` | `129..=2049` | `2` |
+
+The inferred signature type MUST match `key_info.signatureType`. Any other inner-signature shape is invalid.
+
+The historical calls use these ABI interfaces:
+
+| Target | Selector | Call | Return |
+|--------|----------|------|--------|
+| `TIP1020 SignatureVerifier` | `0x19045a25` | `recover(bytes32 hash, bytes signature)` | ABI-encoded `address signer` |
+| `AccountKeychain` | `0xbc298553` | `getKey(address account, address keyId)` | ABI-encoded `KeyInfo(signatureType, keyId, expiry, enforceLimits, isRevoked)` |
+
 If the referenced Tempo block or required historical call result is unavailable to a replaying node, replay verification follows the existing tri-state external-evidence model and MAY return `NotYetVerifiable`. If evidence is available and contradictory, verification MUST fail closed as `Invalid`.
+
+TIP-1020 reverts for malformed or invalid primitive signatures. Such reverts are contradictory evidence and MUST be treated as `Invalid`, not as missing external evidence. RPC transport failures, missing historical state, missing headers, or unavailable finalized frontier MAY be treated as blocking external evidence.
 
 ### 6. Access-Key Restrictions
 
@@ -142,7 +162,7 @@ The only AccountKeychain state requirements for MIP-6 are active authorization, 
 
 ### 7. Security Considerations
 
-Accepting any active Tempo Access Key is intentionally minimal and mirrors the existing ERC-1271 surface area, but it has an important usability risk: a user may authorize an access key for a narrow Tempo application flow and not expect that key to also sign Makechain custody or verification payloads.
+Accepting any active Tempo Access Key is intentionally minimal and mirrors the existing ERC-1271 surface area, but it has an important cross-protocol authority risk: a user may authorize an access key for a narrow Tempo application flow and not expect that key to also satisfy Makechain custody, app-attribution, or verification payloads.
 
 Clients SHOULD make this capability clear when creating or using access keys for Makechain. Applications SHOULD prefer short-lived, per-application access keys.
 
@@ -166,7 +186,7 @@ The cost is that Makechain does not yet have a Makechain-specific access-key per
 
 This MIP is additive for the clean-slate protocol line.
 
-Existing signatures with key types `0`, `1`, `2`, and `3` retain their current behavior. Messages using `key_type = 4` are invalid before MIP-6 activation and valid only under the rules defined here after activation.
+Existing signatures with key types `0`, `1`, `2`, and `3` retain their current behavior. For the clean-slate protocol line that incorporates this MIP, MIP-6 is active from the corresponding genesis/specification version. Networks that do not activate MIP-6 MUST continue rejecting `key_type = 4`.
 
 ### 10. Reference Constants
 

@@ -722,7 +722,7 @@ SignerRemoveContract(address owner, bytes32 key, uint64 validAfter,
 | 0 | secp256k1 | `r:32 \| s:32 \| v:1` | 65 bytes |
 | 1 | P256 (ECDSA) | `r:32 \| s:32 \| v:1` | 65 bytes |
 | 2 | WebAuthn (P256) | Variable-length envelope | 107–2048 bytes |
-| 3 | ERC-1271 | Opaque contract-defined bytes plus companion `custody_block_hash` | 0–8192 bytes |
+| 3 | ERC-1271 | Opaque contract-defined bytes plus companion `custody_block_hash` | 1–8192 bytes |
 | 4 | Tempo Access Key | `0x03 \| root_account:20 \| inner_signature` plus companion `custody_block_hash` | 86–2070 bytes |
 
 - `valid_after` / `valid_before` bound [`MessageData.timestamp`](../proto/makechain.proto).
@@ -1003,11 +1003,11 @@ These checks require no state lookups and MUST be performed before any state acc
 | `FORK` | `source_project_id`: 32 bytes; `source_commit_hash`: 32 bytes; `name`: 1-100 chars; `visibility`: valid enum |
 | `COLLABORATOR_ADD` | `project_id`: 32 bytes; `target_owner_address`: 20 bytes; `permission`: valid enum |
 | `COLLABORATOR_REMOVE` | `project_id`: 32 bytes; `target_owner_address`: 20 bytes |
-| `VERIFICATION_ADD` | `type ≠ NONE`; `address`: 1-128 bytes; for `ETH_ADDRESS`, `address` is raw 20-byte address bytes and `chain_id` is the minimal unsigned big-endian encoding of `host_chain_id(network)`; for `SOL_ADDRESS`, `address` is the raw 32-byte Ed25519 public key and `chain_id` is empty; `claim_signature`: 1-2048 bytes for key types 0/1/2, 0-8192 bytes for key type 3, or 86-2070 bytes for key type 4; `claim_key_type`: 0-4 for `ETH_ADDRESS`; `claim_key_type` is zero/omitted for `SOL_ADDRESS`; `claim_block_hash`: exactly 32 bytes iff `claim_key_type` is 3 or 4 |
+| `VERIFICATION_ADD` | `type ≠ NONE`; `address`: 1-128 bytes; for `ETH_ADDRESS`, `address` is raw 20-byte address bytes and `chain_id` is the minimal unsigned big-endian encoding of `host_chain_id(network)`; for `SOL_ADDRESS`, `address` is the raw 32-byte Ed25519 public key and `chain_id` is empty; `claim_signature`: exactly 65 bytes for key types 0/1, 107-2048 bytes for key type 2, 1-8192 bytes for key type 3, or 86-2070 bytes for key type 4; `claim_key_type`: 0-4 for `ETH_ADDRESS`; `claim_key_type` is zero/omitted for `SOL_ADDRESS`; `claim_block_hash`: exactly 32 bytes iff `claim_key_type` is 3 or 4 |
 | `VERIFICATION_REMOVE` | `address`: 1-128 bytes |
 | `LINK_ADD/REMOVE` | `type ≠ NONE`; exactly one target set; target matches type; FOLLOW: `target_owner_address`: 20 bytes; STAR: `target_project_id`: 32 bytes |
-| `SIGNER_ADD` | `key`: 32 bytes; valid scope; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), 0-8192 bytes (type 3), or 86-2070 bytes (type 4); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 4; `custody_block_hash`: exactly 32 bytes iff `custody_key_type` is 3 or 4; `request_owner_address`: 20 bytes; request sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), 0-8192 bytes (type 3), or 86-2070 bytes (type 4); `request_key_type` ≤ 4; `request_block_hash`: exactly 32 bytes iff `request_key_type` is 3 or 4; `allowed_projects`: max 100 entries, each 32 bytes (agent scope only) |
-| `SIGNER_REMOVE` | `key`: 32 bytes; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), 0-8192 bytes (type 3), or 86-2070 bytes (type 4); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 4; `custody_block_hash`: exactly 32 bytes iff `custody_key_type` is 3 or 4 |
+| `SIGNER_ADD` | `key`: 32 bytes; valid scope; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), 1-8192 bytes (type 3), or 86-2070 bytes (type 4); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 4; `custody_block_hash`: exactly 32 bytes iff `custody_key_type` is 3 or 4; `request_owner_address`: 20 bytes; request sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), 1-8192 bytes (type 3), or 86-2070 bytes (type 4); `request_key_type` ≤ 4; `request_block_hash`: exactly 32 bytes iff `request_key_type` is 3 or 4; `allowed_projects`: max 100 entries, each 32 bytes (agent scope only) |
+| `SIGNER_REMOVE` | `key`: 32 bytes; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), 1-8192 bytes (type 3), or 86-2070 bytes (type 4); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 4; `custody_block_hash`: exactly 32 bytes iff `custody_key_type` is 3 or 4 |
 | `REACTION_ADD/REMOVE` | `type ≠ NONE`; `target_project_id`: 32 bytes; `target_commit_hash`: 32 bytes |
 | `STORAGE_CLAIM` | `owner_address`: 20 bytes; `actor`: 20 bytes; `units > 0`; `settlement_tx_hash`: 32 bytes; `settlement_chain_id = host_chain_id(network)` |
 | `USERNAME_CREATE` | `username` MUST already be canonical lowercase ASCII and match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
@@ -1210,6 +1210,8 @@ For Tempo Access Key signatures, validators MUST evaluate all historical RPC cal
 5. require `KeyInfo.keyId = keyId`, `KeyInfo.isRevoked = false`, `validation_block_timestamp < KeyInfo.expiry`, and `KeyInfo.signatureType` matches `inner_signature`
 
 TIP-1020 MUST receive the inner primitive signature, not the outer Keychain signature, because TIP-1020 rejects Keychain signatures by design. Spending limits and call scopes are Tempo transaction-execution restrictions and are not evaluated for Makechain signatures. Any active, unrevoked, unexpired Tempo Access Key for the expected root account is accepted.
+
+Unavailable historical state, missing headers, RPC transport failures, or an unavailable finalized frontier MAY block replay as missing external evidence. Available but contradictory evidence MUST fail closed as invalid signature evidence; this includes malformed Tempo Access Key envelopes, root-account mismatches, TIP-1020 invalid-signature reverts, malformed ABI return data, missing or revoked AccountKeychain keys, expired keys, signature-type mismatches, and non-canonical validation block hashes.
 
 ### 9.6 Verification Claims
 
