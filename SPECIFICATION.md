@@ -447,8 +447,8 @@ timestamp_valid(M, block_timestamp) → bool:
   if saturating_sub(ts, block_timestamp) > drift:
     return false
 
-  // Reject storage-sensitive messages too far in the past
-  if is_storage_sensitive(M.data.type):
+  // Reject fresh-timestamp-required messages too far in the past
+  if requires_fresh_timestamp(M.data.type):
     if ts < saturating_sub(block_timestamp, drift):
       return false
 
@@ -457,7 +457,11 @@ timestamp_valid(M, block_timestamp) → bool:
 
 All arithmetic MUST use saturating subtraction (clamping to 0 on underflow) since timestamps are unsigned integers.
 
-Storage-sensitive types (types that create or remove quota-affecting state): `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `USERNAME_CREATE`, `USERNAME_UPDATE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `STORAGE_CLAIM`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`.
+Fresh-timestamp-required types: `STORAGE_CLAIM`, `USERNAME_CREATE`, `USERNAME_UPDATE`.
+
+Backfillable project/social/history messages MAY use unlimited older timestamps and MUST NOT be rejected solely because `timestamp < saturating_sub(block_timestamp, drift)`: `PROJECT_CREATE`, `FORK`, `PROJECT_REMOVE`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`.
+
+Quota and storage eligibility checks for backfillable messages continue to use `MessageData.timestamp`. Because storage grants store only `expires_at` and not an activation timestamp, a current grant can validate a backfillable message whose timestamp predates that grant's settlement. This is accepted for this protocol version; validators still perform ordinary current-state authorization and conflict-resolution checks during execution.
 
 ### 4.4 Conflict Resolution
 
