@@ -1066,7 +1066,7 @@ These checks require no state lookups and MUST be performed before any state acc
 - `MessageData.owner_address` MUST be exactly 20 bytes
 - `MessageData.network` MUST be a supported network identifier
 - at external admission points, `MessageData.network` MUST match the local configured network
-- during replay and block execution, `MessageData.network` MUST equal the active chain network carried by the executing `BlockHeader.chain_id`
+- during replay and block execution, `MessageData.network` MUST equal the network the node is validating — chain identity is bound by the chainspec and the network-scoped consensus signing namespace, not a per-block header field
 - exactly one `MessageData.body` variant MUST be present and MUST match `MessageData.type`
 - `MESSAGE_TYPE_NONE` is invalid
 
