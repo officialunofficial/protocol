@@ -999,19 +999,19 @@ This leaves 287 usable bytes. The maximum `ref_name` length is 254 bytes (prefix
 
 ### 6.3 State Proofs
 
-The state store supports three proof surfaces anchored to committed state roots:
+The state store supports operation (inclusion) and exclusion proofs anchored to committed state roots, plus light-client message-inclusion proofs.
 
-The public proof RPC surface for these queries is [`GetOperationProof`](../proto/makechain.proto), [`GetExclusionProof`](../proto/makechain.proto), [`VerifyOperationProof`](../proto/makechain.proto), [`VerifyExclusionProof`](../proto/makechain.proto), [`VerifyOperationProofAtBlock`](../proto/makechain.proto), [`VerifyExclusionProofAtBlock`](../proto/makechain.proto), [`GetStorageQuotaProof`](../proto/makechain.proto), and [`GetCompoundProof`](../proto/makechain.proto).
+Proof generation is a single polymorphic RPC, [`GetStateProof`](../proto/makechain.proto): it takes a set of keys and returns, per key, an operation proof (key present, with value) or an exclusion proof (key absent) — all against one shared committed root. Compound and storage-quota assertions are **composed by the caller** by requesting the relevant keys together in a single `GetStateProof` call so they share that root; they are no longer separate RPCs. Verification RPCs [`VerifyOperationProof`](../proto/makechain.proto) / [`VerifyExclusionProof`](../proto/makechain.proto) check against the current committed root, and [`VerifyOperationProofAtBlock`](../proto/makechain.proto) / [`VerifyExclusionProofAtBlock`](../proto/makechain.proto) against the retained finalized root of an explicit `block_number`. Light clients prove message inclusion against `BlockHeader.transactions_root` via [`GetMessageInclusionProof`](../proto/makechain.proto).
 
 - **Operation proof** — proves a key-value pair exists at a given root (Merkle inclusion path).
 - **Exclusion proof** — proves a key does NOT exist at a given root (neighboring key boundary).
-- **Compound proof** — atomically proves the active key, tombstone key, and prune-marker key for a 2P-set member against a single root.
+- **Compound assertion** — a 2P-set member's active key, tombstone key, and prune-marker key proven together (one `GetStateProof` call, one root).
 
 `VerifyOperationProof` and `VerifyExclusionProof` verify against the current committed root only. Stale proofs MUST be rejected.
 
 `VerifyOperationProofAtBlock` and `VerifyExclusionProofAtBlock` verify against the retained finalized root of an explicit `block_number`. They MUST fail if the requested block is unknown, unavailable, or no longer retained, and MUST NOT silently fall back to the current root.
 
-Active membership in 2P sets can be established either by separate operation/exclusion proofs against the same root or by a single compound proof. A compound proof reports an entry as active iff the active key exists and `added_at > max(tombstone_at, prune_marker_at)`, with missing removal timestamps treated as absent.
+Active membership in 2P sets is established by proving the active key, tombstone key, and prune-marker key together against the same root — requested in one `GetStateProof` call. The entry is active iff the active key exists and `added_at > max(tombstone_at, prune_marker_at)`, with missing removal timestamps treated as absent.
 
 The statement above describes the protocol-level proof model. The public proof allowlists are intentionally narrower than the full state namespace and must match the current V2 proof contract.
 
@@ -1031,7 +1031,7 @@ Proofs over username-index keys prove persisted state only. Inclusion or exclusi
 
 **Storage quota proof:** Authenticates the complete active storage-grant suffix for an `owner_address` at an explicit `as_of_unix_time` against the current root, authenticates the account row used to derive username-gated usable quota, and, when raw active grants are positive and the account row carries a username, authenticates the matching username-index row. A grant is **active** at time `T` if and only if `expires_at > T`. Because the storage grant key layout (Section 6.1, prefix `0x16`) embeds `expires_at` in big-endian immediately after `owner_address`, all grants for a given account are sorted by expiration time in ascending order, enabling efficient range-based proof construction. It is not a historical-state proof — it proves raw active grants and quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
 
-`GetStorageQuotaProofResponse` MUST additionally carry:
+A storage-quota proof is composed as a single `GetStateProof` over the active grant-suffix keys (prefix `0x16`) together with the account key and, when applicable, the username-index key, all against one `root`. From that proof set the caller derives and verifies:
 
 - `account_value` — the encoded `AccountState` for `account(owner_address)`
 - `account_proof` — an operation proof authenticating `account(owner_address)` at `root`
