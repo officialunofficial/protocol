@@ -1051,7 +1051,9 @@ Quota-proof verification is:
 
 ### 6.4 Merkle State
 
-Committed state is stored in a merkleized key-value store. Validators execute each block against a copy-on-write overlay, then merkleize the resulting write-set to produce the committed `state_root`.
+Committed state is stored in a merkleized key-value store (QMDB). State execution is **deferred and lag-committed** (DSMR — deferred state-merkle root, lag-by-`K`, with `K = 1`): consensus propose and verify only **sequence** messages and do not execute state; finalized blocks are then applied asynchronously, in order, in lockstep across honest validators. A block at height `N` therefore carries in `BlockHeader.state_root` the **persisted canonical state root as of height `N − K`** (the genesis root when `N − K < 0`), not its own post-execution root. A proposer embeds its validator-local `state_root_at_height(N − K)`; a verifier accepts the block iff the embedded `state_root` equals its own independently-computed root at height `N − K`. Light clients and the state proofs of Section 6.3 thus resolve against a `state_root` that lags finality by `K` blocks.
+
+`BlockHeader.state_root` is the canonical, path-independent state root (`MakechainRoot`) — chosen because QMDB's own MMR root is path-dependent (commit shape affects the root) and so cannot be the byte-for-byte consensus commitment across validators at differing persistence depth. `BlockHeader.ops_root` (with `ops_range_start` / `ops_range_end`) is a separate QMDB ops-only MMR root used as the proof-verified **sync target**; it is path-dependent and is NOT the consensus state commitment.
 
 The canonical state root authenticates all durable protocol state and secondary indexes. It does **not** commit to a per-message history index.
 
@@ -1132,6 +1134,7 @@ For MIP 4 deployments, quota-bearing add and remove mutations are both gated on 
 **Finality:** Single voting round in the deployed configuration; end-to-end latency is deployment-dependent.
 **Fault tolerance:** Byzantine fault tolerant up to `f` of `3f + 1` validators.
 **Elector:** Deterministic round-robin leader rotation.
+**State execution:** Deferred (DSMR). Consensus only sequences messages; state is executed asynchronously and committed with a `K`-block lag, so `BlockHeader.state_root` is the canonical root at height `N − K` (`K = 1`). See Section 6.4.
 
 Validators are initially a permissioned set.
 
@@ -1200,7 +1203,7 @@ ExecutionPayload {
 
 There is no `reshare` / `ResharePayload`; DKG and dealer-log evidence travel as the separate `dealer_log` and `dkg_outcome` byte fields, each header-bound by its hash.
 
-The finalized block header authenticates the post-execution state root; the finalized payload authenticates the exact executed message sequence. `proposal_digest(R)` refers to the hash of the canonical [`ExecutionPayload`](../proto/makechain.proto) encoding, not to the `digest` field inside `R`.
+The finalized block header authenticates the lag-`K` canonical state root (the persisted root at height `N − K`; Section 6.4); the finalized payload authenticates the exact executed message sequence. `proposal_digest(R)` refers to the hash of the canonical [`ExecutionPayload`](../proto/makechain.proto) encoding, not to the `digest` field inside `R`.
 
 #### Proposal Digest Construction
 
@@ -1227,7 +1230,7 @@ The `proposal_digest(R)` value is what validators sign in finalization certifica
 
 ### 8.3 Empty Blocks
 
-Empty blocks (containing zero messages) MAY be produced periodically to advance the chain height and finalize idle periods. An empty block's `state_root` equals the previous block's `state_root`. The proposer SHOULD throttle empty block production to avoid unnecessary chain growth (e.g., minimum interval between empty blocks).
+Empty blocks (containing zero messages) MAY be produced periodically to advance the chain height and finalize idle periods. Like every block, an empty block carries the lag-`K` `state_root` (the canonical root at height `N − K`; Section 6.4) — once the chain has been idle for at least `K` heights, that lagged root stops changing, so successive empty blocks repeat the same `state_root`. The proposer SHOULD throttle empty block production to avoid unnecessary chain growth (e.g., minimum interval between empty blocks).
 
 ### 8.4 Mempool
 
@@ -1360,8 +1363,8 @@ A **follower node** is a non-validator node that tracks the chain by streaming f
 1. Verify that `consensus_finalization` is a valid finalization certificate from 2f+1 validators over the expected `proposal_digest`.
 2. Verify that the supplied `ExecutionPayload` is structurally consistent with `Block`.
 3. Verify that `proposal_digest(ExecutionPayload)` matches the digest committed by the finalization certificate.
-4. Execute the block's messages through the state transition function (Section 4.2).
-5. Verify that the resulting state root matches the block header's `state_root`.
+4. Execute the block's messages through the state transition function (Section 4.2), applying finalized blocks in order.
+5. Verify the DSMR lag-`K` invariant: `BlockHeader.state_root` equals the follower's own canonical state root at height `N − K` (Section 6.4) — not the root produced by executing block `N` itself.
 
 **State replay:** After verification, the follower applies the block's state changeset to its local state store. Followers MUST use the same two-phase commit protocol as validators (apply state changeset, then persist block entry) with crash-safe journaling.
 
@@ -1706,7 +1709,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 2026.6.1 | 2026-06-05 | **Non-custody spec↔implementation alignment** (documents already-shipped behavior; no semantic change). Block model (§4.2/§8.2/Appendix B/E): `Block = { header, body }` with `BlockBody` + `ConsensusContext`; `ShardChunk`/`ShardWitness`/`chunks` removed; `BlockHeader` drops per-block `version`/`chain_id` and adds `context`/`dkg_outcome_hash`/`dealer_log_hash`/`transactions_root`/`ops_root`/`ops_range_*`; block hash is keccak256 (envelope/content stay BLAKE3); `ExecutionPayload` replaces `reshare` with `dealer_log`+`dkg_outcome`. Versioning (§13.1): protocol version is height-dispatched via chainspec `hardfork_at`, not a per-block field. Proofs (§6.3): four `Get*Proof` RPCs consolidated into polymorphic `GetStateProof`; added `GetMessageInclusionProof`. Sync (§10.3): `GetSyncTarget` + p2p QMDB-sync channel (no `SyncFetch`/`SyncBlocks` RPCs); added `GetEpochState`/`GetStateAttestation`/`GetFinalizationCertificate`. Unified `GetActivity` feed. `proto/makechain.proto` fully synced to the shipped canonical proto. |
+| 2026.6.1 | 2026-06-05 | **Non-custody spec↔implementation alignment** (documents already-shipped behavior; no semantic change). Block model (§4.2/§8.2/Appendix B/E): `Block = { header, body }` with `BlockBody` + `ConsensusContext`; `ShardChunk`/`ShardWitness`/`chunks` removed; `BlockHeader` drops per-block `version`/`chain_id` and adds `context`/`dkg_outcome_hash`/`dealer_log_hash`/`transactions_root`/`ops_root`/`ops_range_*`; block hash is keccak256 (envelope/content stay BLAKE3); `ExecutionPayload` replaces `reshare` with `dealer_log`+`dkg_outcome`. State root (§6.4/§8): documents the DSMR deferred-execution, lag-by-`K` (`K=1`) canonical `state_root` and the separate path-dependent `ops_root` sync target. Versioning (§13.1): protocol version is height-dispatched via chainspec `hardfork_at`, not a per-block field. Proofs (§6.3): four `Get*Proof` RPCs consolidated into polymorphic `GetStateProof`; added `GetMessageInclusionProof`. Sync (§10.3): `GetSyncTarget` + p2p QMDB-sync channel (no `SyncFetch`/`SyncBlocks` RPCs); added `GetEpochState`/`GetStateAttestation`/`GetFinalizationCertificate`. Unified `GetActivity` feed. `proto/makechain.proto` fully synced to the shipped canonical proto. |
 | 2026.6.0 | 2026-06-04 | **Breaking — AccountKeychain custody model (V2 clean break, chain wipe).** Removed ERC-1271 custody and verification entirely (no `custody_key_type` / `request_key_type` / `claim_key_type` / block-hash fields; corresponding proto fields reserved; removed `MAX_CONTRACT_SIGNATURE_LEN`). Custody and signer-management authorization (`SIGNER_ADD`, `SIGNER_REMOVE`, and new `KEYCHAIN_AUTHORIZE` (25) / `KEYCHAIN_REVOKE` (26)) now use native `Keccak256(commonware_codec(...))` digests with an operation byte and a target key-family byte — not EIP-712. Introduced the custody-key family: the `0x06` keyspace is now `[0x06 \| owner_address:20 \| family:1 \| key_id]` (family `0x00` envelope, `0x01` custody); the root `owner_address` is the implicit admin forever and is never stored as a custody key; custody keys follow a never-seen → active → revoked lifecycle with permanent tombstones. Custody signatures use one self-describing envelope (65=secp256k1, `0x01`=P256, `0x02`=WebAuthn, `0x03 \| account:20 \| primitive`=keychain wrapper); nested wrappers and high-S rejected; WebAuthn origin/RP-ID not enforced. `ETH_ADDRESS` verification claims keep the EIP-712 `VerificationClaim` hash but verify a direct unified-envelope signature locally (no ERC-1271); `MAX_CLAIM_SIGNATURE_LEN` is 16,384 bytes. `custody_nonce` is the shared replay guard across all four custody operations, burned only on the mutated account. |
 | 2026.5.3 | 2026-04-23 | Bump the clean-slate transport version to `6` and commit optional DKG/reshare payloads in `ExecutionPayload.reshare`, making reshare data part of the finalized proposal digest and persisted block-payload pair. |
 | 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's usable storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
