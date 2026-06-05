@@ -8,7 +8,7 @@
 
 A specialized protocol built for making things.
 
-**Version:** 2026.6.0
+**Version:** 2026.6.1
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every committed message is verifiable from canonical state and, where applicable, finalized message-local external evidence.
 
@@ -1326,7 +1326,7 @@ The public RPC surface includes:
 
 `MergeRequestSummary` includes `request_id`, `project_id`, `requester_owner_address`, `source_project_id`, `source_ref`, `source_commit_hash`, `target_ref`, `title`, and `added_at`.
 
-Generic message surfaces keyed by `MessageType`, including `ListMessages`, `GetProjectActivity`, `GetAccountActivity`, and `SubscribeMessages`, MUST recognize `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE`. For project-filtered generic surfaces, both message types are associated with the target `project_id`.
+Generic message surfaces keyed by `MessageType`, including `ListMessages`, the unified [`GetActivity`](../proto/makechain.proto) feed (`scope` = `PROJECT` / `ACCOUNT` / `GLOBAL`, with the matching identifier in `scope_id`), and `SubscribeMessages`, MUST recognize `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE`. For project-scoped (`scope = PROJECT`) generic surfaces, both message types are associated with the target `project_id`.
 
 Closure attribution is historical rather than canonical-state derived: clients that need to distinguish requester withdrawal from maintainer closure MUST inspect finalized `MERGE_REQUEST_REMOVE` history for the same `(project_id, request_id)` pair and compare the closer's `owner_address` with the original requester.
 
@@ -1706,6 +1706,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.6.1 | 2026-06-05 | **Non-custody spec↔implementation alignment** (documents already-shipped behavior; no semantic change). Block model (§4.2/§8.2/Appendix B/E): `Block = { header, body }` with `BlockBody` + `ConsensusContext`; `ShardChunk`/`ShardWitness`/`chunks` removed; `BlockHeader` drops per-block `version`/`chain_id` and adds `context`/`dkg_outcome_hash`/`dealer_log_hash`/`transactions_root`/`ops_root`/`ops_range_*`; block hash is keccak256 (envelope/content stay BLAKE3); `ExecutionPayload` replaces `reshare` with `dealer_log`+`dkg_outcome`. Versioning (§13.1): protocol version is height-dispatched via chainspec `hardfork_at`, not a per-block field. Proofs (§6.3): four `Get*Proof` RPCs consolidated into polymorphic `GetStateProof`; added `GetMessageInclusionProof`. Sync (§10.3): `GetSyncTarget` + p2p QMDB-sync channel (no `SyncFetch`/`SyncBlocks` RPCs); added `GetEpochState`/`GetStateAttestation`/`GetFinalizationCertificate`. Unified `GetActivity` feed. `proto/makechain.proto` fully synced to the shipped canonical proto. |
 | 2026.6.0 | 2026-06-04 | **Breaking — AccountKeychain custody model (V2 clean break, chain wipe).** Removed ERC-1271 custody and verification entirely (no `custody_key_type` / `request_key_type` / `claim_key_type` / block-hash fields; corresponding proto fields reserved; removed `MAX_CONTRACT_SIGNATURE_LEN`). Custody and signer-management authorization (`SIGNER_ADD`, `SIGNER_REMOVE`, and new `KEYCHAIN_AUTHORIZE` (25) / `KEYCHAIN_REVOKE` (26)) now use native `Keccak256(commonware_codec(...))` digests with an operation byte and a target key-family byte — not EIP-712. Introduced the custody-key family: the `0x06` keyspace is now `[0x06 \| owner_address:20 \| family:1 \| key_id]` (family `0x00` envelope, `0x01` custody); the root `owner_address` is the implicit admin forever and is never stored as a custody key; custody keys follow a never-seen → active → revoked lifecycle with permanent tombstones. Custody signatures use one self-describing envelope (65=secp256k1, `0x01`=P256, `0x02`=WebAuthn, `0x03 \| account:20 \| primitive`=keychain wrapper); nested wrappers and high-S rejected; WebAuthn origin/RP-ID not enforced. `ETH_ADDRESS` verification claims keep the EIP-712 `VerificationClaim` hash but verify a direct unified-envelope signature locally (no ERC-1271); `MAX_CLAIM_SIGNATURE_LEN` is 16,384 bytes. `custody_nonce` is the shared replay guard across all four custody operations, burned only on the mutated account. |
 | 2026.5.3 | 2026-04-23 | Bump the clean-slate transport version to `6` and commit optional DKG/reshare payloads in `ExecutionPayload.reshare`, making reshare data part of the finalized proposal digest and persisted block-payload pair. |
 | 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's usable storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
