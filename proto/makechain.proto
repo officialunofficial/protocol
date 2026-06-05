@@ -1157,7 +1157,7 @@ message GetBlockRequest {
 message GetBlockResponse {
   Block block = 1;
   ExecutionPayload execution_payload = 2;
-  // BLAKE3 over the encoded `BlockHeader` of `block`. Server-computed
+  // keccak256 over the encoded `BlockHeader` of `block`. Server-computed
   // on demand (no longer cached on the block envelope). Sibling field
   // here so REST/JSON consumers don't have to re-encode + hash to
   // identify the block. 32 bytes.
@@ -1188,7 +1188,7 @@ message GetMessageResponse {
 // --- Message Inclusion Proof (Cleanup #18, #636 / #648) ---
 
 message GetMessageInclusionProofRequest {
-  // 32-byte BLAKE3 hash of the block whose `transactions_root` we are
+  // 32-byte keccak256 hash of the block whose `transactions_root` we are
   // proving inclusion against. Required.
   bytes block_hash   = 1;
   // 32-byte BLAKE3 hash of the message whose inclusion we want to
