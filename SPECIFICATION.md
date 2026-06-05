@@ -8,7 +8,7 @@
 
 A specialized protocol built for making things.
 
-**Version:** 2026.5.2
+**Version:** 2026.6.0
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every committed message is verifiable from canonical state and, where applicable, finalized message-local external evidence.
 
@@ -94,9 +94,10 @@ Throughout this document, "MUST", "MUST NOT", "SHOULD", and "MAY" follow [RFC 21
 |-----------|-------|-----------|
 | **Ed25519** | Message signing and validator identity | [RFC 8032][rfc8032] |
 | **BLAKE3** | Message hashing, content addressing, Merkle trees | [BLAKE3 spec][blake3] |
-| **secp256k1 ECDSA** | EIP-712 custody signatures (key type 0) | [SEC 2][sec2] |
-| **P-256 ECDSA** | EIP-712 custody signatures (key type 1, 2) | [FIPS 186-5][fips186] |
-| **EIP-712** | Typed structured data signing for custody and verification | [EIP-712][eip712] |
+| **secp256k1 ECDSA** | AccountKeychain custody signatures; recovered-EOA key ids | [SEC 2][sec2] |
+| **P-256 ECDSA** | AccountKeychain custody signatures (direct and WebAuthn) | [FIPS 186-5][fips186] |
+| **Keccak-256** | AccountKeychain custody/signer authorization digests; key-id derivation | Ethereum `keccak256` |
+| **EIP-712** | Typed structured data signing for external `ETH_ADDRESS` verification claims only | [EIP-712][eip712] |
 
 ---
 
@@ -128,7 +129,7 @@ signer ∈ registered_keys(data.owner_address)
 scope(signer) ≤ required_scope(data.type)
 ```
 
-**Custody-authorized user messages** (`SIGNER_ADD`, `SIGNER_REMOVE`) — the Ed25519 envelope provides integrity, but authorization comes from an EIP-712 custody signature verified against the account's `owner_address`. These messages bypass the delegated-key registration lookup entirely.
+**Custody-authorized user messages** (`SIGNER_ADD`, `SIGNER_REMOVE`, `KEYCHAIN_AUTHORIZE`, `KEYCHAIN_REVOKE`) — the Ed25519 envelope provides integrity, but authorization comes from an AccountKeychain custody signature over a native Keccak-256 digest, verified by `verify_keychain_admin` against the account's `owner_address` (Section 5.5). These messages bypass the delegated-key registration lookup entirely.
 
 **Settlement-verified storage-funding messages** (`STORAGE_CLAIM`) — the Ed25519 envelope provides integrity, while authorization derives from finalized settlement verification against the claim coordinates and payload. If the claim marker already exists after successful settlement verification, execution is an idempotent no-op.
 
@@ -194,7 +195,7 @@ Every message type follows one of two paradigms:
 | Append-only | Monotonic growth, protocol-pruned | `COMMIT_BUNDLE` |
 | State transition | Deterministic preconditioned state rewrite | `PROJECT_ARCHIVE`, `USERNAME_CREATE`, `USERNAME_UPDATE` |
 | Settlement-verified storage-funding message | Finalized settlement verification and marker-idempotent replay | `STORAGE_CLAIM` |
-| Custody-authorized | Authorization from EIP-712 custody signature | `SIGNER_ADD`, `SIGNER_REMOVE` |
+| Custody-authorized | Authorization from AccountKeychain custody signature (`verify_keychain_admin`) | `SIGNER_ADD`, `SIGNER_REMOVE`, `KEYCHAIN_AUTHORIZE`, `KEYCHAIN_REVOKE` |
 
 **2P (two-phase)** — Add/Remove pairs operating on a set.
 
@@ -212,25 +213,27 @@ Every message type follows one of two paradigms:
 | `PROJECT_ARCHIVE` | 3 | 1P Transition | SIGNING | [`ProjectArchiveBody`](../proto/makechain.proto) |
 | `FORK` | 4 | 1P Singleton | SIGNING | [`ForkBody`](../proto/makechain.proto) |
 | `PROJECT_REMOVE` | 5 | 2P Set | SIGNING | [`ProjectRemoveBody`](../proto/makechain.proto) |
-| `REF_UPDATE` | 10 | 2P CAS | AGENT | [`RefUpdateBody`](../proto/makechain.proto) |
-| `REF_DELETE` | 11 | 2P CAS | AGENT | [`RefDeleteBody`](../proto/makechain.proto) |
-| `COMMIT_BUNDLE` | 20 | 1P Append | AGENT | [`CommitBundleBody`](../proto/makechain.proto) |
-| `COLLABORATOR_ADD` | 30 | 2P Set | SIGNING (ADMIN) | [`CollaboratorAddBody`](../proto/makechain.proto) |
-| `COLLABORATOR_REMOVE` | 31 | 2P Set | SIGNING (ADMIN) | [`CollaboratorRemoveBody`](../proto/makechain.proto) |
-| `ACCOUNT_DATA` | 40 | 1P LWW | SIGNING | [`AccountDataBody`](../proto/makechain.proto) |
-| `VERIFICATION_ADD` | 60 | 2P Set | SIGNING | [`VerificationAddBody`](../proto/makechain.proto) |
-| `VERIFICATION_REMOVE` | 61 | 2P Set | SIGNING | [`VerificationRemoveBody`](../proto/makechain.proto) |
-| `STORAGE_CLAIM` | 72 | Settlement-verified storage-funding message | none; duplicate replay short-circuits after settlement verification | [`StorageClaimBody`](../proto/makechain.proto) |
-| `USERNAME_CREATE` | 73 | 1P State transition | SIGNING | [`UsernameCreateBody`](../proto/makechain.proto) |
-| `USERNAME_UPDATE` | 74 | 1P State transition | SIGNING | [`UsernameUpdateBody`](../proto/makechain.proto) |
-| `LINK_ADD` | 80 | 2P Set | SIGNING | [`LinkAddBody`](../proto/makechain.proto) |
-| `LINK_REMOVE` | 81 | 2P Set | SIGNING | [`LinkRemoveBody`](../proto/makechain.proto) |
-| `REACTION_ADD` | 82 | 2P Set | SIGNING | [`ReactionAddBody`](../proto/makechain.proto) |
-| `REACTION_REMOVE` | 83 | 2P Set | SIGNING | [`ReactionRemoveBody`](../proto/makechain.proto) |
-| `SIGNER_ADD` | 14 | Custody-auth | (custody sig) | [`SignerAddBody`](../proto/makechain.proto) |
-| `SIGNER_REMOVE` | 15 | Custody-auth | (custody sig) | [`SignerRemoveBody`](../proto/makechain.proto) |
-| `MERGE_REQUEST_ADD` | 84 | 2P Set | SIGNING | [`MergeRequestAddBody`](../proto/makechain.proto) |
-| `MERGE_REQUEST_REMOVE` | 85 | 2P Set | SIGNING | [`MergeRequestRemoveBody`](../proto/makechain.proto) |
+| `REF_UPDATE` | 6 | 2P CAS | AGENT | [`RefUpdateBody`](../proto/makechain.proto) |
+| `REF_DELETE` | 7 | 2P CAS | AGENT | [`RefDeleteBody`](../proto/makechain.proto) |
+| `SIGNER_ADD` | 8 | Custody-auth | (custody sig) | [`SignerAddBody`](../proto/makechain.proto) |
+| `SIGNER_REMOVE` | 9 | Custody-auth | (custody sig) | [`SignerRemoveBody`](../proto/makechain.proto) |
+| `COMMIT_BUNDLE` | 10 | 1P Append | AGENT | [`CommitBundleBody`](../proto/makechain.proto) |
+| `COLLABORATOR_ADD` | 11 | 2P Set | SIGNING (ADMIN) | [`CollaboratorAddBody`](../proto/makechain.proto) |
+| `COLLABORATOR_REMOVE` | 12 | 2P Set | SIGNING (ADMIN) | [`CollaboratorRemoveBody`](../proto/makechain.proto) |
+| `ACCOUNT_DATA` | 13 | 1P LWW | SIGNING | [`AccountDataBody`](../proto/makechain.proto) |
+| `VERIFICATION_ADD` | 14 | 2P Set | SIGNING | [`VerificationAddBody`](../proto/makechain.proto) |
+| `VERIFICATION_REMOVE` | 15 | 2P Set | SIGNING | [`VerificationRemoveBody`](../proto/makechain.proto) |
+| `STORAGE_CLAIM` | 16 | Settlement-verified storage-funding message | none; duplicate replay short-circuits after settlement verification | [`StorageClaimBody`](../proto/makechain.proto) |
+| `USERNAME_CREATE` | 17 | 1P State transition | SIGNING | [`UsernameCreateBody`](../proto/makechain.proto) |
+| `USERNAME_UPDATE` | 18 | 1P State transition | SIGNING | [`UsernameUpdateBody`](../proto/makechain.proto) |
+| `LINK_ADD` | 19 | 2P Set | SIGNING | [`LinkAddBody`](../proto/makechain.proto) |
+| `LINK_REMOVE` | 20 | 2P Set | SIGNING | [`LinkRemoveBody`](../proto/makechain.proto) |
+| `REACTION_ADD` | 21 | 2P Set | SIGNING | [`ReactionAddBody`](../proto/makechain.proto) |
+| `REACTION_REMOVE` | 22 | 2P Set | SIGNING | [`ReactionRemoveBody`](../proto/makechain.proto) |
+| `KEYCHAIN_AUTHORIZE` | 25 | Custody-auth | (keychain admin sig) | [`KeychainAuthorizeBody`](../proto/makechain.proto) |
+| `KEYCHAIN_REVOKE` | 26 | Custody-auth | (keychain admin sig) | [`KeychainRevokeBody`](../proto/makechain.proto) |
+| `MERGE_REQUEST_ADD` | 23 | 2P Set | SIGNING | [`MergeRequestAddBody`](../proto/makechain.proto) |
+| `MERGE_REQUEST_REMOVE` | 24 | 2P Set | SIGNING | [`MergeRequestRemoveBody`](../proto/makechain.proto) |
 
 † `PROJECT_CREATE` is paired with `PROJECT_REMOVE` as a 2P Set, but does not follow the generic `apply_2p_add` re-add path because `project_id` is content-addressed (Section 2.5). See Section 4.2 for the specific semantics.
 
@@ -268,7 +271,8 @@ An account is identified by `owner_address` (`bytes(20)`). Each account's state 
 |-------|------|-------------|
 | `owner_address` | `bytes(20)` | Canonical account identifier and project owner identity. |
 | `keys` | Set of `KeyState` | Registered Ed25519 public keys with scopes. |
-| `custody_nonce` | `uint64` | Replay counter for `SIGNER_ADD` and `SIGNER_REMOVE`. |
+| `custody_nonce` | `uint64` | Monotonic replay counter for keychain and signer-management mutations (`KEYCHAIN_AUTHORIZE`, `KEYCHAIN_REVOKE`, `SIGNER_ADD`, `SIGNER_REMOVE`). Burned only on the mutated account; never on a request owner. |
+| `custody_keys` | Set of `CustodyKeyState` | AccountKeychain custody keys under family `0x01` (Section 6.1). Each carries `signature_type`, `public_key`, `admin`, `expires_at`, lifecycle status, `added_at`, `revoked_at`. |
 | `metadata` | Map of `(field → (value, timestamp))` | Display name, avatar, bio, website. LWW per field. |
 | `verifications` | 2P Set | External address ownership proofs. |
 | `links` | 2P Set | Follow/star relationships. |
@@ -297,7 +301,7 @@ Privilege ordering: `OWNER < SIGNING < AGENT` (numerically). A key with scope `s
 
 V2 has no relay-injected identity or signer-management messages.
 
-The only live delegated-key management flow is custody-authorized `SIGNER_ADD` / `SIGNER_REMOVE`, authorized directly against `owner_address`.
+The only live delegated-key (envelope, family `0x00`) management flow is custody-authorized `SIGNER_ADD` / `SIGNER_REMOVE`. The AccountKeychain custody-key family (family `0x01`) is mutated by `KEYCHAIN_AUTHORIZE` / `KEYCHAIN_REVOKE`. All four are authorized by `verify_keychain_admin` against `owner_address` (Section 5.5): the root `owner_address` is the implicit admin forever, and any active admin custody key may also authorize, via a keychain wrapper.
 
 The only Tempo-backed storage ingress is `STORAGE_CLAIM`, a settlement-verified user-submitted message that funds raw storage grants. Username control is handled separately by delegated-key-authorized `USERNAME_CREATE` and `USERNAME_UPDATE` messages. Duplicate replay remains anchored to settled claim coordinates.
 
@@ -624,7 +628,7 @@ V2 has no generic unsigned system-message path.
 
 All committed V2 block messages are user-submitted envelope-bearing messages. The only bypass rules are:
 
-- `SIGNER_ADD` and `SIGNER_REMOVE` bypass delegated-key lookup; authority derives exclusively from valid custody signatures verified against `owner_address`.
+- `SIGNER_ADD`, `SIGNER_REMOVE`, `KEYCHAIN_AUTHORIZE`, and `KEYCHAIN_REVOKE` bypass delegated-key lookup; authority derives exclusively from AccountKeychain custody signatures accepted by `verify_keychain_admin` against `owner_address` (Section 5.5).
 - `STORAGE_CLAIM` bypasses delegated-key lookup; authority derives exclusively from finalized settlement verification plus claim-marker idempotence.
 
 Pre-V2 relay-era families (`KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, `RELAY_SIGNER_REMOVE`) are not defined in the V2 protobuf. Any message bearing one of these legacy type values MUST fail structural validation as an invalid `MessageType`.
@@ -664,110 +668,175 @@ Under the existing scope ordering, `OWNER` and `SIGNING` satisfy the username-me
 
 ### 5.5 Custody-Authorized Message Authorization
 
-`SIGNER_ADD` and `SIGNER_REMOVE` bypass the Ed25519 signer-is-registered check. Authorization comes from an EIP-712 custody signature verified against `owner_address`:
+`SIGNER_ADD`, `SIGNER_REMOVE`, `KEYCHAIN_AUTHORIZE`, and `KEYCHAIN_REVOKE` bypass
+the Ed25519 signer-is-registered check. Authorization is an AccountKeychain
+custody signature over a native Keccak-256 authorization digest, accepted by
+`verify_keychain_admin` against `owner_address`. This model has no EIP-712 typed
+data, no ERC-1271, and no `custody_key_type` / validation-block-hash fields.
+
+#### 5.5.1 Authorization Digests
+
+Each authorization digest is `Keccak256(commonware_codec(payload))`, where the
+payload begins with a one-byte operation discriminant and — for the family-bound
+operations — a one-byte target key family:
+
+| Op byte | Operation | Target family byte |
+|---------|-----------|--------------------|
+| `0x01` | `KEYCHAIN_AUTHORIZE` | `0x01` (custody) |
+| `0x02` | `KEYCHAIN_REVOKE` | `0x01` (custody) |
+| `0x03` | `SIGNER_ADD` | `0x00` (envelope) |
+| `0x04` | `SIGNER_REMOVE` | `0x00` (envelope) |
+| `0x05` | `SIGNER_REQUEST` | (none) |
+
+The family byte binds each signed payload to the keyspace family it mutates
+(Section 6.1), so a signature for an envelope operation cannot be replayed
+against the custody family or vice versa.
+
+Each payload is encoded with `commonware-codec` (canonical, byte-stable) in the
+field order below, then hashed with Keccak-256. The `KEYCHAIN_AUTHORIZE` and
+`KEYCHAIN_REVOKE` digests additionally commit to a `witness` field — optional
+app-challenge binding bytes that change the digest but are never persisted.
 
 ```
-authorize_signer_op(σ, data, body) → Ok | Err:
-  require len(data.owner_address) = 20
-  let acct = σ[account_key(data.owner_address)]  // default-zero if absent
-  require body.valid_after ≤ data.timestamp ≤ body.valid_before
-  require body.valid_before - body.valid_after ≤ MAX_VALIDITY_WINDOW
-  require body.nonce = acct.custody_nonce
-  let hash = eip712_signing_hash(...)
-  require verify_custody(hash, body.custody_signature, body.custody_key_type, data.owner_address)
-  return Ok  // caller increments custody_nonce by 1 on success
+keychain_authorize_digest = Keccak256(commonware_codec(
+  0x01 | 0x01 | network:i32 | owner_address:20 | key_id:20 |
+  signature_type:u8 | public_key:bytes | admin:bool | expires_at:u64 |
+  valid_after:u64 | valid_before:u64 | nonce:u64 | witness:bytes))
+
+keychain_revoke_digest = Keccak256(commonware_codec(
+  0x02 | 0x01 | network:i32 | owner_address:20 | key_id:20 |
+  valid_after:u64 | valid_before:u64 | nonce:u64 | witness:bytes))
+
+signer_add_digest = Keccak256(commonware_codec(
+  0x03 | 0x00 | network:i32 | owner_address:20 | request_owner_address:20 |
+  key:32 | scope:u32 | valid_after:u64 | valid_before:u64 | nonce:u64 |
+  allowed_projects:[32]))
+
+signer_remove_digest = Keccak256(commonware_codec(
+  0x04 | 0x00 | network:i32 | owner_address:20 | key:32 |
+  valid_after:u64 | valid_before:u64 | nonce:u64))
+
+signer_request_digest = Keccak256(commonware_codec(
+  0x05 | network:i32 | owner_address:20 | request_owner_address:20 |
+  key:32 | scope:u32 | valid_after:u64 | valid_before:u64 | nonce:u64 |
+  allowed_projects:[32]))
 ```
 
-**EIP-712 Domain:** `{ name: "Makechain", version: "1", chainId: host_chain_id(data.network) }`
+`network` is the [`MessageData.network`](../proto/makechain.proto) enum value,
+binding each digest to a single Makechain network and preventing cross-network
+replay. `commonware_codec` length-prefixes variable-length `bytes` and `[32]`
+lists.
 
-`host_chain_id(network)` is the canonical [EIP-155][eip155] chain ID of the Tempo settlement chain bound to that Makechain network. The EIP-712 domain MUST use that chain ID so wallet signing, settlement verification, and historical ERC-1271 checks all bind to the same finalized Tempo chain.
+#### 5.5.2 Authorization Predicate (`verify_keychain_admin`)
 
-Current deployments:
-- `devnet` → `42431` (Tempo Moderato)
-- `testnet` → `42431` (Tempo Moderato)
-- `mainnet` → `4217` (Tempo mainnet)
+```
+verify_keychain_admin(σ, owner_address, digest, signature, effective_time) → Ok | Err:
+  let v = verify_account_signature(digest, signature)   // parses unified envelope (5.5.3)
+  if v.wrapper_account is Some(a) and a ≠ owner_address:
+    return Err   // wrapper account must equal owner_address
 
-Unknown or unsupported network identifiers MUST fail closed for EIP-712 custody, app-attribution, and ETH verification-claim signing or verification.
+  // Root path: signer recovered to the owner_address itself.
+  if v.key_id == owner_address:
+    return Ok
 
-**`SignerAdd` type declaration** (mirrors [`SignerAddBody`](../proto/makechain.proto)):
-```
-SignerAdd(address owner, bytes32 key, uint32 scope, uint64 validAfter,
-          uint64 validBefore, uint64 nonce, bytes32[] allowedProjects, uint32 network)
-```
+  // Delegated path: MUST be a keychain-wrapped signature.
+  if v.wrapper_account is None:
+    return Err   // delegated custody-key signatures require a 0x03 wrapper
 
-For `custody_key_type = 3`, the typed payload is:
-```
-SignerAddContract(address owner, bytes32 key, uint32 scope, uint64 validAfter,
-                  uint64 validBefore, uint64 nonce, bytes32[] allowedProjects,
-                  uint32 network, bytes32 validationBlockHash)
-```
-
-**`SignerRemove` type declaration** (mirrors [`SignerRemoveBody`](../proto/makechain.proto)):
-```
-SignerRemove(address owner, bytes32 key, uint64 validAfter,
-             uint64 validBefore, uint64 nonce, uint32 network)
-```
-
-For `custody_key_type = 3`, the typed payload is:
-```
-SignerRemoveContract(address owner, bytes32 key, uint64 validAfter,
-                     uint64 validBefore, uint64 nonce, uint32 network,
-                     bytes32 validationBlockHash)
+  let k = σ[custody_key_entry_key(owner_address, v.key_id)]
+  require k ≠ ⊥
+  require k.status == Active
+  require k.admin == true
+  require k.expires_at == 0 OR effective_time ≤ k.expires_at
+  require k.signature_type == v.signature_type
+  return Ok
 ```
 
-**Custody Signature Types:**
+`effective_time` is the consensus block timestamp under real execution, so
+expiry and the validity window cannot be bypassed by backdating the
+attacker-chosen [`MessageData.timestamp`](../proto/makechain.proto).
 
-| `custody_key_type` | Curve | Format | Size |
-|----|-------|--------|------|
-| 0 | secp256k1 | `r:32 \| s:32 \| v:1` | 65 bytes |
-| 1 | P256 (ECDSA) | `r:32 \| s:32 \| v:1` | 65 bytes |
-| 2 | WebAuthn (P256) | Variable-length envelope | 107–2048 bytes |
-| 3 | ERC-1271 | Opaque contract-defined bytes plus companion `custody_block_hash` | 0–8192 bytes |
+#### 5.5.3 Unified Self-Describing Signature Envelope
 
-- `valid_after` / `valid_before` bound [`MessageData.timestamp`](../proto/makechain.proto).
-- `nonce` MUST match the account's current `custody_nonce` for `owner_address`.
-- `allowedProjects` binds the key's project allowlist into the `SignerAdd` signature, preventing allowlist manipulation before finalization.
-- `network` binds the signature to [`MessageData.network`](../proto/makechain.proto), preventing cross-network replay.
-- The EIP-712 domain `chainId` MUST equal `host_chain_id(data.network)`.
-- `custody_block_hash` MUST be present and exactly 32 bytes iff `custody_key_type = 3`, and MUST identify a finalized canonical Tempo block on `host_chain_id(data.network)`.
+A custody/claim signature selects its primitive by length or leading byte; a
+keychain wrapper prefixes a primitive with `0x03 | account:20`. Nested wrappers
+are rejected, and secp256k1 and P256 signatures MUST be low-S normalized
+(high-S rejected).
 
-**[WebAuthn][webauthn] Envelope Wire Format (custody_key_type=2):**
+| Form | Layout | Size | Primitive |
+|------|--------|------|-----------|
+| secp256k1 direct | `r:32 \| s:32 \| v:1` | 65 bytes | secp256k1 ECDSA (recovered EOA = key id) |
+| P256 direct | `0x01 \| r:32 \| s:32 \| pub_x:32 \| pub_y:32 \| pre_hash:1` | 130 bytes | P256 ECDSA; `pre_hash` MUST equal `1` |
+| WebAuthn P256 | `0x02 \| authenticatorData \|\| clientDataJSON \| sig:64 \| pub_x:32 \| pub_y:32` | variable | WebAuthn P256 assertion |
+| Keychain wrapper | `0x03 \| account:20 \| <primitive>` | 21 + inner | Delegated; `account` MUST equal `owner_address` |
+
+A bare 65-byte input is always parsed as secp256k1 even if its first byte is
+`0x03`; the parser is length-first, so the `0x03` wrapper tag is only honored
+for inputs longer than 65 bytes.
+
+**Key-id derivation:**
+- secp256k1: `keccak256(uncompressed_pubkey[1:65])[12:32]` (standard Ethereum address)
+- P256 / WebAuthn P256: `keccak256(pub_x:32 \| pub_y:32)[12:32]` (Tempo P256 address)
+
+P256 and WebAuthn therefore share the same 20-byte key-id space for the same
+underlying P256 keypair.
+
+**WebAuthn P256 assertion rules:**
+- `authenticatorData` — the flags byte (offset 32) MUST have UP (bit 0) and UV (bit 2) set.
+- `clientDataJSON` — `"type"` MUST be `"webauthn.get"`; `"challenge"` MUST be the
+  base64url encoding (unpadded, URL alphabet) of the authorization digest.
+- `origin` and `rpIdHash` are NOT enforced (Section 5.5.5).
+- `sig` — raw P256 ECDSA `r:32 \| s:32`, low-S normalized.
+- The signed message is `SHA-256(authenticatorData \|\| SHA-256(clientDataJSON))`.
+- The embedded P256 public key determines the key id; there is no recovery byte.
+- The total WebAuthn envelope MUST NOT exceed 2048 bytes.
+
+#### 5.5.4 Custody Preamble (validity window and nonce)
+
+Before digest verification, every custody/keychain operation checks:
+
 ```
-[auth_data_len:LE(2) | authenticatorData | client_json_len:LE(2) | clientDataJSON | sig:64 | v:1]
+verify_custody_preamble(σ, owner_address, valid_after, valid_before, effective_time, nonce):
+  let acct = σ[account(owner_address)]                       // default-zero if absent
+  require valid_after ≤ effective_time ≤ valid_before
+  require valid_before - valid_after ≤ MAX_VALIDITY_WINDOW    // 3,600 seconds
+  require nonce == acct.custody_nonce
 ```
 
-- `authenticatorData` — Flags byte (offset 32) MUST have UP (bit 0) and UV (bit 2) set.
-- `clientDataJSON` — MUST contain `"type": "webauthn.get"`, a `"challenge"` that is the base64url encoding of the EIP-712 signing hash, and a canonical secure `"origin"`. `crossOrigin` MUST be absent or `false`.
-- `sig` — Raw P256 ECDSA (`r:32 | s:32`, low-S normalized).
-- `v` — Recovery ID hint (0 or 1); values > 1 are rejected.
+On success the handler increments `acct.custody_nonce` by exactly 1 on the
+mutated account. For `SIGNER_ADD`, the `request_signature` is verified by
+`verify_keychain_admin(request_owner_address, signer_request_digest, …)`; the
+request owner's nonce is never burned.
+
+#### 5.5.5 WebAuthn Origin / RP-ID Not Enforced
+
+Makechain treats a WebAuthn assertion as portable custody-signature material.
+Validators MUST NOT check `rpIdHash` in `authenticatorData` or `origin` in
+`clientDataJSON`, and there is no relying-party allowlist. Authority comes
+entirely from the challenge binding (challenge == authorization digest), the
+`webauthn.get` type, the UP/UV flags, the P256 signature, and the embedded
+public key.
 
 ### 5.6 App Attribution
 
 Every `SIGNER_ADD` MUST include app attribution:
 
-- `request_owner_address` — requesting app wallet address (20 bytes).
-- `request_signature` — EIP-712 `SignerRequest` signature from that requesting app wallet.
+- `request_owner_address` — requesting app wallet address (20 bytes). It is not a Makechain account lookup key.
+- `request_signature` — an AccountKeychain custody signature over the `SIGNER_REQUEST` digest (Section 5.5.1), accepted by `verify_keychain_admin(request_owner_address, signer_request_digest, request_signature)`.
 
-**SignerRequest type declaration:**
-```
-SignerRequest(address requestOwner, bytes32 key, uint64 validAfter, uint64 validBefore, uint32 network)
-```
+The request owner authorizes either with its root key signing directly
+(`key_id == request_owner_address`) or with an active admin custody key of the
+request owner signing through a keychain wrapper whose `account ==
+request_owner_address`. Verifying the request signature consults the request
+owner's custody-key state but never burns its `custody_nonce`.
 
-For `request_key_type = 3`, the typed payload is:
-```
-SignerRequestContract(address requestOwner, bytes32 key, uint64 validAfter,
-                      uint64 validBefore, uint32 network, bytes32 validationBlockHash)
-```
-
-Verifiers MUST verify `request_signature` over `SignerRequest` directly against `request_owner_address`. No Makechain account lookup is required for the requesting app address. `SIGNER_REMOVE` carries no app attribution.
-
-For self-request, `request_owner_address = owner_address` and the same wallet signs both custody and app-attribution signatures.
-
-`request_block_hash` MUST be present and exactly 32 bytes iff `request_key_type = 3`, and MUST identify a finalized canonical Tempo block on `host_chain_id(data.network)`.
+For self-request, `request_owner_address == owner_address` and the same key
+authorizes both the custody and app-attribution digests. `SIGNER_REMOVE`,
+`KEYCHAIN_AUTHORIZE`, and `KEYCHAIN_REVOKE` carry no app attribution.
 
 ### 5.7 Custody Nonce Sharing
 
-The `custody_nonce` counter is shared across the two live custody operations: `SIGNER_ADD` and `SIGNER_REMOVE`. Each successful operation increments the nonce by exactly 1.
+The `custody_nonce` counter is shared across all four custody operations on a single account: `KEYCHAIN_AUTHORIZE`, `KEYCHAIN_REVOKE`, `SIGNER_ADD`, and `SIGNER_REMOVE`. Each successful operation increments the mutated account's nonce by exactly 1. A `SIGNER_ADD` request signature consults but never increments the request owner's nonce.
 
 ### 5.7A Address Derivation
 
@@ -857,8 +926,8 @@ State is stored in a merkleized key-value store with prefix-byte namespacing. Al
 | `0x03` | Tombstone | `[0x03 \| active_key:*]` |
 | `0x04` | Account | `[0x04 \| owner_address:20]` |
 | `0x05` | Account metadata | `[0x05 \| owner_address:20 \| field:1]` |
-| `0x06` | Key | `[0x06 \| owner_address:20 \| pubkey:32]` |
-| `0x07` | Key reverse index | `[0x07 \| pubkey:32] -> owner_address` |
+| `0x06` | Key (two families) | `[0x06 \| owner_address:20 \| family:1 \| key_id]` |
+| `0x07` | Envelope-key reverse index | `[0x07 \| pubkey:32] -> owner_address` |
 | `0x08` | Username index | `[0x08 \| username:*] -> owner_address` |
 | `0x09` | Verification | `[0x09 \| owner_address:20 \| address:*]` |
 | `0x0A` | Project | `[0x0A \| project_id:32]` |
@@ -892,6 +961,25 @@ Prefix `0x08` stores the canonical lowercase username index used to enforce glob
 | `0x03` | Verifications |
 
 MIP 5 does not allocate a new per-account counter family for merge requests. Requester-scoped reads use the reverse index at `0x1C`.
+
+**Key families** for prefix `0x06`:
+
+| `family` | Family | `key_id` | Total key length | Value |
+|----------|--------|----------|------------------|-------|
+| `0x00` | Envelope (delegated Ed25519 signer) | Ed25519 `pubkey:32` | 54 bytes | `KeyState` (scope, allowed_projects, request_owner_address, added_at) |
+| `0x01` | Custody (AccountKeychain key) | EVM-derived `address:20` | 42 bytes | `CustodyKeyState` (status, signature_type, public_key, admin, expires_at, added_at, revoked_at) |
+
+The owner-first layout keeps every key for an account contiguous under
+`[0x06 | owner_address]`, and the family byte separates envelope signers from
+custody keys. The reverse index `0x07` covers only the envelope family
+(`pubkey:32 -> owner_address`); custody keys have no reverse index. The root
+`owner_address` is the implicit admin and is never stored as a custody key.
+
+**Custody-key lifecycle.** A custody key is `never seen → active → revoked`.
+`KEYCHAIN_AUTHORIZE` writes an `Active` row (rejecting an already-`Active` or
+already-`Revoked` key id). `KEYCHAIN_REVOKE` flips an `Active` row to `Revoked`,
+sets `revoked_at`, and retains the row as a permanent tombstone; re-authorizing
+a revoked `key_id` fails closed. `admin` custody keys MUST have `expires_at == 0`.
 
 **Merkleized prefixes:** exactly `0x03` through `0x17` inclusive, plus `0x1A`, `0x1B`, and `0x1C`. Prefix `0x02` (blocks) is persisted but non-merkleized. Prefixes `0x18` and `0x19` are non-merkleized operational state used for replay deduplication and crash recovery. Legacy `0x01` message-state storage is not part of the canonical V2 state schema or state root.
 
@@ -994,11 +1082,13 @@ These checks require no state lookups and MUST be performed before any state acc
 | `FORK` | `source_project_id`: 32 bytes; `source_commit_hash`: 32 bytes; `name`: 1-100 chars; `visibility`: valid enum |
 | `COLLABORATOR_ADD` | `project_id`: 32 bytes; `target_owner_address`: 20 bytes; `permission`: valid enum |
 | `COLLABORATOR_REMOVE` | `project_id`: 32 bytes; `target_owner_address`: 20 bytes |
-| `VERIFICATION_ADD` | `type ≠ NONE`; `address`: 1-128 bytes; for `ETH_ADDRESS`, `address` is raw 20-byte address bytes and `chain_id` is the minimal unsigned big-endian encoding of `host_chain_id(network)`; for `SOL_ADDRESS`, `address` is the raw 32-byte Ed25519 public key and `chain_id` is empty; `claim_signature`: 1-2048 bytes for key types 0/1/2 or 0-8192 bytes for key type 3; `claim_key_type`: 0-3 for `ETH_ADDRESS`; `claim_key_type` is zero/omitted for `SOL_ADDRESS`; `claim_block_hash`: exactly 32 bytes iff `claim_key_type = 3` |
+| `VERIFICATION_ADD` | `type ≠ NONE`; `address`: 1-128 bytes; for `ETH_ADDRESS`, `address` is raw 20-byte address bytes, `chain_id` is the minimal unsigned big-endian encoding of `host_chain_id(network)`, and `claim_signature` (1 byte–16,384 bytes) MUST parse as a *direct* unified-envelope signature (secp256k1 65 bytes, P256 `0x01`-prefixed, or WebAuthn `0x02`-prefixed; keychain `0x03` wrappers rejected); for `SOL_ADDRESS`, `address` is the raw 32-byte Ed25519 public key, `chain_id` is empty, and `claim_signature` is exactly 64 bytes |
 | `VERIFICATION_REMOVE` | `address`: 1-128 bytes |
 | `LINK_ADD/REMOVE` | `type ≠ NONE`; exactly one target set; target matches type; FOLLOW: `target_owner_address`: 20 bytes; STAR: `target_project_id`: 32 bytes |
-| `SIGNER_ADD` | `key`: 32 bytes; valid scope; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 3; `custody_block_hash`: exactly 32 bytes iff `custody_key_type = 3`; `request_owner_address`: 20 bytes; request sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `request_key_type` ≤ 3; `request_block_hash`: exactly 32 bytes iff `request_key_type = 3`; `allowed_projects`: max 100 entries, each 32 bytes (agent scope only) |
-| `SIGNER_REMOVE` | `key`: 32 bytes; custody sig: 65 bytes (type 0/1), 107-2048 bytes (type 2), or 0-8192 bytes (type 3); `valid_after/before` non-zero, ordered, window ≤ max; `custody_key_type` ≤ 3; `custody_block_hash`: exactly 32 bytes iff `custody_key_type = 3` |
+| `SIGNER_ADD` | `key`: 32 bytes; valid scope; `custody_signature`: 1 byte–16,384 bytes and MUST parse as a unified-envelope signature; `valid_after`/`valid_before` non-zero, ordered, window ≤ `MAX_VALIDITY_WINDOW`; `request_owner_address`: 20 bytes; `request_signature`: 1 byte–16,384 bytes and MUST parse as a unified-envelope signature; `allowed_projects`: max 100 entries, each 32 bytes (agent scope only). No `custody_key_type` / `request_key_type` / block-hash fields exist. |
+| `SIGNER_REMOVE` | `key`: 32 bytes; `custody_signature`: 1 byte–16,384 bytes and MUST parse as a unified-envelope signature; `valid_after`/`valid_before` non-zero, ordered, window ≤ `MAX_VALIDITY_WINDOW`. No `custody_key_type` / block-hash field exists. |
+| `KEYCHAIN_AUTHORIZE` | `key_id`: 20 bytes; `public_key`: 64 or 65 bytes; valid `signature_type`; `admin` keys MUST have `expires_at == 0`; `valid_after`/`valid_before` non-zero, ordered, window ≤ `MAX_VALIDITY_WINDOW`; `authorization_signature`: 1 byte–16,384 bytes and MUST parse as a unified-envelope signature; `witness` ≤ 1,024 bytes |
+| `KEYCHAIN_REVOKE` | `key_id`: 20 bytes; `valid_after`/`valid_before` non-zero, ordered, window ≤ `MAX_VALIDITY_WINDOW`; `revocation_signature`: 1 byte–16,384 bytes and MUST parse as a unified-envelope signature; `witness` ≤ 1,024 bytes |
 | `REACTION_ADD/REMOVE` | `type ≠ NONE`; `target_project_id`: 32 bytes; `target_commit_hash`: 32 bytes |
 | `STORAGE_CLAIM` | `owner_address`: 20 bytes; `actor`: 20 bytes; `units > 0`; `settlement_tx_hash`: 32 bytes; `settlement_chain_id = host_chain_id(network)` |
 | `USERNAME_CREATE` | `username` MUST already be canonical lowercase ASCII and match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
@@ -1017,9 +1107,9 @@ These checks require state lookups:
 - **`PROJECT_REMOVE`:** Signer must be the project's canonical owner (`project.owner_address == data.owner_address`).
 - **`PROJECT_ARCHIVE`:** Signer must be the project's canonical owner (`project.owner_address == data.owner_address`).
 - **`PROJECT_CREATE`:** Account has available usable storage capacity; name is unique within owner's namespace.
-- **`VERIFICATION_ADD`:** `claim_signature` is valid for the given address, type, and network. For `ETH_ADDRESS`, `VerificationAddBody.chain_id` MUST equal the minimal unsigned big-endian encoding of `host_chain_id(MessageData.network)`. For `SOL_ADDRESS`, `VerificationAddBody.chain_id` MUST be empty. If `claim_key_type = 3`, verification MUST use ERC-1271 on `host_chain_id(MessageData.network)` pinned to `claim_block_hash`.
+- **`VERIFICATION_ADD`:** `claim_signature` is valid for the given address, type, and network. For `ETH_ADDRESS`, the signed payload is the EIP-712 `VerificationClaim` typed-data hash (Section 9.6); the signature is verified locally as a direct secp256k1, P256, or WebAuthn P256 signature whose derived key id equals the claimed 20-byte address, and `VerificationAddBody.chain_id` MUST equal the minimal unsigned big-endian encoding of `host_chain_id(MessageData.network)`. For `SOL_ADDRESS`, `VerificationAddBody.chain_id` MUST be empty. There is no ERC-1271 path and no contract signature type.
 - **`LINK_ADD`:** FOLLOW target must be a valid `owner_address`; STAR target must exist and not be removed.
-- **`SIGNER_ADD/REMOVE`:** See Section 5.5. `SIGNER_ADD` MUST also satisfy the app-attribution checks in Section 5.6. If `custody_key_type = 3` or `request_key_type = 3`, the referenced block hash MUST identify a finalized canonical Tempo block on `host_chain_id(MessageData.network)`.
+- **`SIGNER_ADD/REMOVE/KEYCHAIN_AUTHORIZE/KEYCHAIN_REVOKE`:** See Section 5.5. The custody preamble (validity window bound to consensus block time, and `nonce == custody_nonce`) MUST pass, and `verify_keychain_admin` MUST accept the operation digest. `SIGNER_ADD` MUST also satisfy the app-attribution checks in Section 5.6. `KEYCHAIN_AUTHORIZE` MUST reject `key_id == owner_address`, MUST verify `key_id` is derived from `public_key`, and MUST reject an already-active or previously-revoked `key_id`. `KEYCHAIN_REVOKE` MUST reject `key_id == owner_address` and MUST reject an already-revoked key. No external-evidence or block-hash check applies to any of these operations.
 - **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
 - **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op. Otherwise claimant expired storage grants MUST be swept at `MessageData.timestamp`, the raw storage grant MUST be added, and cached `AccountState.storage_units` MUST be refreshed. `STORAGE_CLAIM` does not assign or update usernames.
@@ -1137,7 +1227,7 @@ V2 does not inject relay-derived system messages into Makechain blocks.
 Tempo integration is message-local only:
 
 1. `STORAGE_CLAIM` verification fetches finalized settlement evidence for a specific claim.
-2. ERC-1271 verification, where supported, uses finalized historical Tempo state pinned by `blockHash` for the specific signature being verified.
+2. (Reserved.) V2 has no ERC-1271 verification path; custody and verification signatures are verified locally from self-describing signature bytes, with no historical `eth_call`.
 
 No block-global checkpoint or Tempo frontier is committed, replayed, or published into consensus state.
 
@@ -1164,7 +1254,7 @@ Persisted-block replay verification is tri-state:
 - `Invalid` — the stored history is contradictory or malformed and must fail closed
 - `NotYetVerifiable` — the block is structurally sound, but required finalized external evidence is not currently available locally or via configured RPC access
 
-Replay verification is message-local in V2. It applies only to message families that require external evidence, such as `STORAGE_CLAIM` settlement verification or ERC-1271 historical verification.
+Replay verification is message-local in V2. It applies only to message families that require external evidence, such as `STORAGE_CLAIM` settlement verification. Custody, signer-management, and verification-claim signatures require no external evidence and are fully verifiable from the message bytes alone.
 
 Disabled relay-era message families remain invalid during replay and fail closed immediately.
 
@@ -1189,21 +1279,13 @@ Replay-sensitive surfaces MUST still fail closed until replay verification is `V
 
 ### 9.6 Verification Claims
 
-**ETH_ADDRESS** — EIP-712 typed-data signature proving control of the exact claimed Ethereum address. The signer may be a secp256k1 EOA, a raw P256 signer, a WebAuthn P256 passkey, or an ERC-1271 contract on `host_chain_id(network)`:
+**ETH_ADDRESS** — an EIP-712 typed-data signature proving control of the exact claimed Ethereum address. The signer MAY be a secp256k1 EOA, a raw P256 signer, or a WebAuthn P256 passkey; the `claim_signature` is a *direct* unified-envelope signature (Section 5.5.3) — keychain `0x03` wrappers are rejected for claim signatures. There is no ERC-1271 path.
 ```
 VerificationClaim(address owner, address ethAddress, uint256 chainId, uint32 verificationType, string network)
 ```
-For `claim_key_type = 3`, the typed payload is:
-```
-VerificationClaimContract(address owner, address ethAddress, uint256 chainId,
-                          uint32 verificationType, string network,
-                          bytes32 validationBlockHash)
-```
 Domain: `{ name: "Makechain", version: "1", chainId: host_chain_id(network) }`.
 
-For `ETH_ADDRESS`, both the typed-data field `VerificationClaim.chainId` and the wire field [`VerificationAddBody.chain_id`](../proto/makechain.proto) MUST equal `host_chain_id(MessageData.network)`. On the wire, `VerificationAddBody.chain_id` MUST use the minimal unsigned big-endian byte encoding of that host-chain ID. A verifier MUST reject the claim if either value does not match the canonical host-chain ID for the Makechain network.
-
-If `claim_key_type = 3`, `claim_block_hash` MUST be exactly 32 bytes, MUST identify a finalized canonical Tempo block on `host_chain_id(MessageData.network)`, and MUST be bound into the signed payload.
+For `ETH_ADDRESS`, both the typed-data field `VerificationClaim.chainId` and the wire field [`VerificationAddBody.chain_id`](../proto/makechain.proto) MUST equal `host_chain_id(MessageData.network)`. On the wire, `VerificationAddBody.chain_id` MUST use the minimal unsigned big-endian byte encoding of that host-chain ID. A verifier MUST reject the claim if either value does not match, or if the key id derived from the signature does not equal the claimed 20-byte address.
 
 **SOL_ADDRESS** — Ed25519 signature over `"makechain:verify:<network>:<owner_address_hex>"`. On the wire, the verification address MUST be the raw 32-byte Ed25519 public key and `VerificationAddBody.chain_id` MUST be empty.
 
@@ -1396,8 +1478,11 @@ Replay and sync operate entirely within the post-reset history and canonical rul
 | `MAX_VALUE_LEN` | 500 bytes | Maximum metadata value length |
 | `MAX_TITLE_LEN` | 200 bytes | Maximum commit title length |
 | `MAX_URL_LEN` | 2,048 bytes | Maximum content URL length |
-| `MAX_CLAIM_SIGNATURE_LEN` | 2,048 bytes | Maximum verification claim signature for key types 0/1/2 |
-| `MAX_CONTRACT_SIGNATURE_LEN` | 8,192 bytes | Maximum ERC-1271 signature payload |
+| `MAX_CLAIM_SIGNATURE_LEN` | 16,384 bytes | Maximum `ETH_ADDRESS` claim signature (unified envelope) |
+| `MAX_KEYCHAIN_SIGNATURE_LEN` | 16,384 bytes | Maximum custody / keychain authorization signature |
+| `MAX_KEYCHAIN_PUBLIC_KEY_LEN` | 65 bytes | Maximum custody public key (secp256k1 SEC1 uncompressed) |
+| `MAX_KEYCHAIN_WITNESS_LEN` | 1,024 bytes | Maximum `KEYCHAIN_AUTHORIZE` / `KEYCHAIN_REVOKE` witness |
+| `MAX_ALLOWED_PROJECTS` | 100 | Maximum `allowed_projects` entries per agent key (wire limit) |
 | `MAX_ADDRESS_LEN` | 128 bytes | Maximum verification address length |
 | `MAX_CHAIN_ID_LEN` | 32 bytes | Maximum verification chain ID length |
 | `MEMPOOL_CAPACITY` | 100,000 | Default mempool capacity |
@@ -1407,6 +1492,8 @@ Replay and sync operate entirely within the post-reset history and canonical rul
 | `STORAGE_RENTAL_PERIOD` | 365 days | Base storage rental period |
 | `STORAGE_GRACE_PERIOD` | 30 days | Grace period after rental expiry |
 | `STORAGE_TOTAL_PERIOD` | 395 days | `STORAGE_RENTAL_PERIOD + STORAGE_GRACE_PERIOD` |
+| `QMDB_KEY_SIZE` | 289 bytes | Fixed key size (287 usable + 2-byte length footer) |
+| `SIMPLEX_NAMESPACE` | `b"makechain-v0"` | Simplex BFT namespace for finalization certificates |
 
 ### Host Chain Mapping
 
@@ -1417,9 +1504,10 @@ Replay and sync operate entirely within the post-reset history and canonical rul
 | `DEVNET` | `42431` | Tempo Moderato |
 | `TESTNET` | `42431` | Tempo Moderato |
 | `MAINNET` | `4217` | Tempo mainnet |
-| `MAX_ALLOWED_PROJECTS` | 100 | Maximum allowed_projects entries per key |
-| `QMDB_KEY_SIZE` | 289 bytes | Fixed key size (287 usable + 2-byte length footer) |
-| `SIMPLEX_NAMESPACE` | `b"makechain-v0"` | Simplex BFT namespace for finalization certificates |
+
+`QMDB_KEY_SIZE` (289 bytes; 287 usable + 2-byte length footer) and
+`SIMPLEX_NAMESPACE` (`b"makechain-v0"`, the Simplex BFT finalization-certificate
+namespace) are listed with the protocol constants above.
 
 ### Settlement Contract Mapping
 
@@ -1489,7 +1577,6 @@ The clean-slate `Genesis` baseline no longer treats Tempo contracts as block-mes
 Tempo dependencies are message-local only:
 
 - `STORAGE_CLAIM` verifies finalized settlement-chain evidence for a specific claim.
-- ERC-1271 verification performs finalized historical `eth_call` by `blockHash` on `host_chain_id(network)`.
 
 Any deployment-specific settlement or wallet-integration contracts remain operational details rather than canonical Makechain message sources.
 
@@ -1507,7 +1594,7 @@ Given a fixed block sequence, tombstone-backed 2P Set resolution is deterministi
 For any two project-level messages `M₁`, `M₂` targeting different `project_id` values, `apply(apply(σ, M₁), M₂) = apply(apply(σ, M₂), M₁)`. This is the property that enables future parallel execution.
 
 ### INV-4: Custody Nonce Monotonicity
-For each account, `custody_nonce` is strictly monotonically increasing. Each successful `SIGNER_ADD` or `SIGNER_REMOVE` increments the nonce by exactly 1.
+For each account, `custody_nonce` is strictly monotonically increasing. Each successful `KEYCHAIN_AUTHORIZE`, `KEYCHAIN_REVOKE`, `SIGNER_ADD`, or `SIGNER_REMOVE` on that account increments the nonce by exactly 1. A `SIGNER_ADD` request signature never increments the request owner's nonce.
 
 ### INV-5: Owner Address Immutability
 `owner_address` is the canonical account identity. No protocol message can retarget an account's state to a different `owner_address`.
@@ -1525,7 +1612,7 @@ For each account, `custody_nonce` is strictly monotonically increasing. Each suc
 For each account, `counter(owner_address, 0x01)` equals the count of active link entries for that account. Similarly for `counter(owner_address, 0x02)` (reactions) and `counter(owner_address, 0x03)` (verifications). Handlers MUST maintain counter accuracy across add, remove, and prune operations.
 
 ### INV-10: Reverse Index Consistency
-For every forward entry under prefixes `0x06`, `0x10`, `0x12`, the corresponding reverse index entry under `0x07`, `0x11`, `0x13` (respectively) MUST exist, and vice versa. Handlers MUST atomically maintain both forward and reverse entries.
+For every forward entry under prefixes `0x06` family `0x00` (envelope keys), `0x10`, and `0x12`, the corresponding reverse index entry under `0x07`, `0x11`, `0x13` (respectively) MUST exist, and vice versa. Custody keys (`0x06` family `0x01`) have no reverse index. Handlers MUST atomically maintain both forward and reverse entries.
 
 ### INV-11: Storage Claim Idempotence
 Once a `claim_id` is persisted under prefix `0x17`, any subsequent `STORAGE_CLAIM` carrying the same logical settlement coordinates MUST be a no-op.
@@ -1569,6 +1656,9 @@ Every accepted `MERGE_REQUEST_ADD` binds a concrete source ref head at creation 
 ### INV-24: Username Update Cooldown
 If an account's most recent successful username set occurred at `username_last_set_at = t`, then any later successful `USERNAME_UPDATE` for that account MUST satisfy `MessageData.timestamp ≥ t + USERNAME_CHANGE_COOLDOWN`, evaluated with saturating `uint32` arithmetic. Successful `USERNAME_CREATE` and `USERNAME_UPDATE` both rewrite `username_last_set_at` to the accepted message timestamp.
 
+### INV-25: Permanent Custody Tombstones
+Once a custody key id under `[0x06 | owner_address | 0x01]` is `Revoked`, it remains `Revoked` forever; no `KEYCHAIN_AUTHORIZE` can return it to `Active`. The root `owner_address` is never stored as a custody key.
+
 ## Appendix E: Genesis State
 
 The genesis state `σ₀` is the empty key-value store. No pre-registered accounts, projects, or validator identities exist in protocol state. The genesis block (block 0) has:
@@ -1587,6 +1677,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.6.0 | 2026-06-04 | **Breaking — AccountKeychain custody model (V2 clean break, chain wipe).** Removed ERC-1271 custody and verification entirely (no `custody_key_type` / `request_key_type` / `claim_key_type` / block-hash fields; corresponding proto fields reserved; removed `MAX_CONTRACT_SIGNATURE_LEN`). Custody and signer-management authorization (`SIGNER_ADD`, `SIGNER_REMOVE`, and new `KEYCHAIN_AUTHORIZE` (25) / `KEYCHAIN_REVOKE` (26)) now use native `Keccak256(commonware_codec(...))` digests with an operation byte and a target key-family byte — not EIP-712. Introduced the custody-key family: the `0x06` keyspace is now `[0x06 \| owner_address:20 \| family:1 \| key_id]` (family `0x00` envelope, `0x01` custody); the root `owner_address` is the implicit admin forever and is never stored as a custody key; custody keys follow a never-seen → active → revoked lifecycle with permanent tombstones. Custody signatures use one self-describing envelope (65=secp256k1, `0x01`=P256, `0x02`=WebAuthn, `0x03 \| account:20 \| primitive`=keychain wrapper); nested wrappers and high-S rejected; WebAuthn origin/RP-ID not enforced. `ETH_ADDRESS` verification claims keep the EIP-712 `VerificationClaim` hash but verify a direct unified-envelope signature locally (no ERC-1271); `MAX_CLAIM_SIGNATURE_LEN` is 16,384 bytes. `custody_nonce` is the shared replay guard across all four custody operations, burned only on the mutated account. |
 | 2026.5.3 | 2026-04-23 | Bump the clean-slate transport version to `6` and commit optional DKG/reshare payloads in `ExecutionPayload.reshare`, making reshare data part of the finalized proposal digest and persisted block-payload pair. |
 | 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's usable storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
 | 2026.5.1 | 2026-04-16 | Amend MIP 5 merge-request quota semantics to use a requester-global active-entry limit plus a target-project namespace ceiling, and allow requester withdrawal of active merge requests from removed target projects while the active row still exists. |
