@@ -52,6 +52,9 @@ message MessageData {
 
     MergeRequestAddBody    merge_request_add    = 27;
     MergeRequestRemoveBody merge_request_remove = 28;
+
+    KeychainAuthorizeBody  keychain_authorize  = 29;
+    KeychainRevokeBody     keychain_revoke     = 30;
   }
 }
 
@@ -88,6 +91,8 @@ enum MessageType {
   MESSAGE_TYPE_REACTION_REMOVE     = 22;
   MESSAGE_TYPE_MERGE_REQUEST_ADD   = 23;
   MESSAGE_TYPE_MERGE_REQUEST_REMOVE = 24;
+  MESSAGE_TYPE_KEYCHAIN_AUTHORIZE  = 25;
+  MESSAGE_TYPE_KEYCHAIN_REVOKE     = 26;
 }
 
 enum Network {
@@ -277,8 +282,8 @@ message VerificationAddBody {
   bytes address                      = 2;  // External address/identifier (e.g. 20-byte Ethereum address)
   bytes claim_signature              = 3;  // Signature from the external key proving ownership
   bytes chain_id                     = 4;  // Chain identifier (e.g. 1 = Ethereum mainnet, 10 = Optimism)
-  uint32 claim_key_type              = 5;
-  bytes claim_block_hash             = 6;
+  reserved 5, 6;
+  reserved "claim_key_type", "claim_block_hash";
 }
 
 message VerificationRemoveBody {
@@ -357,37 +362,79 @@ message MergeRequestRemoveBody {
 }
 
 // ============================================================
-// 2P: SIGNER SET — Self-authenticating key operations
+// 2P: SIGNER SET — AccountKeychain-authorized key operations
 //
 // These are submitted directly by clients.
-// Authorization comes from an EIP-712 custody_signature signed by the
-// account's owner_address, not from the message envelope signer.
+// Authorization comes from AccountKeychain admin signatures, not from the
+// message envelope signer.
 // ============================================================
 
 message SignerAddBody {
   bytes key = 1;                        // Ed25519 public key, 32 bytes
   uint32 scope = 2;                     // KeyScope: 0 = Owner, 1 = Signing, 2 = Agent
-  bytes custody_signature = 3;          // EIP-712 signature: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
+  bytes custody_signature = 3;          // AccountKeychain admin signature over this signer-add operation
   repeated bytes allowed_projects = 4;  // Agent scope: project IDs (32 bytes each)
-  uint32 custody_key_type = 5;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271
   uint64 nonce = 6;                     // Must match account custody_nonce (replay protection)
-  bytes request_signature = 7;         // EIP-712 SignerRequest sig from app's owner_address: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
-  uint32 request_key_type = 8;        // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271
-  uint64 valid_after = 9;             // Earliest unix timestamp accepted for this authorization
+  bytes request_signature = 7;          // AccountKeychain signature from request_owner_address for app attribution
+  uint64 valid_after = 9;               // Earliest unix timestamp accepted for this authorization
   uint64 valid_before = 10;             // Latest unix timestamp accepted for this authorization
-  bytes request_owner_address = 11;    // 20-byte owner address of requesting app when known
-  bytes custody_block_hash = 12;       // Required iff custody_key_type == 3, exactly 32 bytes
-  bytes request_block_hash = 13;       // Required iff request_key_type == 3, exactly 32 bytes
+  bytes request_owner_address = 11;     // 20-byte owner address of requesting app when known
+  reserved 5, 8, 12, 13;
+  reserved "custody_key_type", "request_key_type", "custody_block_hash", "request_block_hash";
 }
 
 message SignerRemoveBody {
   bytes key = 1;                        // Ed25519 public key to remove, 32 bytes
-  bytes custody_signature = 2;          // EIP-712 signature: 65 bytes (type 0/1) or WebAuthn envelope (type 2)
-  uint32 custody_key_type = 3;          // 0 = secp256k1, 1 = P256, 2 = WebAuthn P256, 3 = ERC1271
+  bytes custody_signature = 2;          // AccountKeychain admin signature over this signer-remove operation
   uint64 nonce = 4;                     // Must match account custody_nonce (replay protection)
   uint64 valid_after = 5;               // Earliest unix timestamp accepted for this authorization
   uint64 valid_before = 6;              // Latest unix timestamp accepted for this authorization
-  bytes custody_block_hash = 7;         // Required iff custody_key_type == 3, exactly 32 bytes
+  reserved 3, 7;
+  reserved "custody_key_type", "custody_block_hash";
+}
+
+enum CustodySignatureType {
+  CUSTODY_SIGNATURE_TYPE_NONE = 0;
+  CUSTODY_SIGNATURE_TYPE_SECP256K1 = 1;
+  CUSTODY_SIGNATURE_TYPE_P256 = 2;
+  CUSTODY_SIGNATURE_TYPE_WEBAUTHN_P256 = 3;
+}
+
+// Lifecycle status of an AccountKeychain custody key in query responses.
+// NOTE: this wire enum (UNSPECIFIED=0/ACTIVE=1/REVOKED=2) does NOT share
+// discriminants with the state `CustodyKeyState::status` (Active=0/Revoked=1);
+// the API layer converts explicitly. ACTIVE means "not revoked"; expiry is a
+// separate concern carried by `expires_at`, never folded into REVOKED.
+enum CustodyKeyStatus {
+  CUSTODY_KEY_STATUS_UNSPECIFIED = 0;
+  CUSTODY_KEY_STATUS_ACTIVE = 1;
+  CUSTODY_KEY_STATUS_REVOKED = 2;
+}
+
+// ============================================================
+// 2P: ACCOUNT KEYCHAIN — Custody key authorization/revocation
+// ============================================================
+
+message KeychainAuthorizeBody {
+  bytes key_id = 1;                                // 20-byte custody key id derived from public_key
+  CustodySignatureType signature_type = 2;
+  bytes public_key = 3;                            // secp256k1 SEC1 uncompressed 65 bytes, or P256 x||y 64 bytes
+  bool admin = 4;                                  // Admin keys can authorize account-level mutations
+  uint64 expires_at = 5;                           // 0 means never expires; admin keys must never expire
+  uint64 valid_after = 6;                          // Earliest unix timestamp accepted for this authorization
+  uint64 valid_before = 7;                         // Latest unix timestamp accepted for this authorization
+  uint64 nonce = 8;                                // Must match account custody_nonce (replay protection)
+  bytes authorization_signature = 9;               // AccountKeychain admin signature over this authorize operation
+  bytes witness = 10;                              // Optional app challenge binding; not burned on success
+}
+
+message KeychainRevokeBody {
+  bytes key_id = 1;                                // 20-byte custody key id to revoke
+  uint64 valid_after = 2;                          // Earliest unix timestamp accepted for this revocation
+  uint64 valid_before = 3;                         // Latest unix timestamp accepted for this revocation
+  uint64 nonce = 4;                                // Must match account custody_nonce (replay protection)
+  bytes revocation_signature = 5;                  // AccountKeychain admin signature over this revoke operation
+  bytes witness = 6;                               // Optional app challenge binding; not burned on success
 }
 
 // ============================================================
@@ -555,6 +602,8 @@ service MakechainService {
   // Read path — keys
   rpc GetKey(GetKeyRequest) returns (GetKeyResponse);
   rpc ListKeys(ListKeysRequest) returns (ListKeysResponse);
+  rpc GetCustodyKey(GetCustodyKeyRequest) returns (GetCustodyKeyResponse);
+  rpc ListCustodyKeys(ListCustodyKeysRequest) returns (ListCustodyKeysResponse);
 
   // Read path — verifications
   rpc ListVerifications(ListVerificationsRequest) returns (ListVerificationsResponse);
@@ -823,6 +872,7 @@ message GetAccountResponse {
   string username = 20;       // Canonical active username (empty when no active username)
   uint32 key_count = 21;
   uint32 verification_count = 22;
+  repeated CustodyKeyEntry custody_keys = 25; // Convenience snapshot of AccountKeychain custody keys; ListCustodyKeys is the paginated source of truth
 }
 
 message AccountSummary {
@@ -871,6 +921,45 @@ message ListKeysRequest {
 
 message ListKeysResponse {
   repeated GetKeyResponse keys = 1;
+  bytes next_cursor = 2;
+}
+
+// --- AccountKeychain custody keys (read surface) ---
+
+// A custody-family key under an account keyring. Distinct from KeyEntry
+// (envelope Ed25519 signers): key_id is a 20-byte EVM-derived address.
+message CustodyKeyEntry {
+  bytes key_id = 1;                       // 20-byte EVM-derived custody key id
+  CustodySignatureType signature_type = 2;
+  bytes public_key = 3;                   // explicit pubkey material (secp256k1 65B SEC1 / P256 64B x||y)
+  bool admin = 4;
+  uint64 expires_at = 5;                  // 0 = non-expiring; admin keys are always 0
+  uint32 added_at = 6;
+  uint32 revoked_at = 7;                  // 0 while active
+  CustodyKeyStatus status = 8;
+}
+
+message GetCustodyKeyRequest {
+  bytes owner_address = 1;  // 20-byte owner address
+  bytes key_id = 2;         // 20-byte custody key id
+}
+
+message GetCustodyKeyResponse {
+  CustodyKeyEntry custody_key = 1;
+}
+
+message ListCustodyKeysRequest {
+  uint32 limit = 1;
+  // Opaque pagination cursor: echo `next_cursor` from the previous page
+  // verbatim. It is the full internal storage key (NOT a bare key_id) and
+  // must be treated as opaque by clients.
+  bytes cursor = 2;
+  bytes owner_address = 3;  // 20-byte owner address
+}
+
+message ListCustodyKeysResponse {
+  repeated CustodyKeyEntry custody_keys = 1;
+  // Opaque cursor for the next page; empty when there are no more results.
   bytes next_cursor = 2;
 }
 
