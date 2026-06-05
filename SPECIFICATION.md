@@ -8,7 +8,7 @@
 
 A specialized protocol built for making things.
 
-**Version:** 2026.6.0
+**Version:** 2026.6.1
 
 > Makechain orders and stores signed messages — project creation, commits, ref updates, access control — on a single-chain BFT ledger with sub-second finality. Consensus handles metadata; file content lives off-chain. Every committed message is verifiable from canonical state and, where applicable, finalized message-local external evidence.
 
@@ -363,7 +363,7 @@ Given state `σ`, finalized block `B`, and the committed execution payload `R` a
 
 ```
 apply_block(σ, B, R) → σ':
-  require digest(R) is the proposal digest finalized by B.consensus_finalization
+  require proposal_digest(R) is the canonical block hash finalized by B.consensus_finalization
   let account_msgs = R.account_messages
   let project_groups = R.project_messages
 
@@ -391,13 +391,13 @@ apply_block(σ, B, R) → σ':
   return σ₂
 ```
 
-`ExecutionPayload` is the canonical execution input. Verifiers MUST execute the exact `account_messages` and `project_messages` order carried in `R`. `Block.chunks[*].txns[*].user_messages` redundantly mirror the finalized per-project message groups for persisted verification, sync, and indexing; account-message order is carried only by `ExecutionPayload.account_messages`. Each `project_id` MUST appear at most once in `ExecutionPayload.project_messages`; duplicate entries make the payload invalid. If the block's mirrored per-project messages differ from `ExecutionPayload.project_messages`, the block is invalid.
+`ExecutionPayload` is the canonical execution input. Verifiers MUST execute the exact `account_messages` and `project_messages` order carried in `R`. `Block.body.user_messages` is a flat stream that redundantly mirrors the finalized user messages for persisted verification, sync, and indexing; per-project groups are recovered on demand from each message's `project_id`. Account-message order is carried only by `ExecutionPayload.account_messages` (mirrored in `Block.body.account_messages`). Each `project_id` MUST appear at most once in `ExecutionPayload.project_messages`; duplicate entries make the payload invalid. If the block body's per-project grouping differs from `ExecutionPayload.project_messages`, the block is invalid.
 
 **Account messages** (Phase 1, serial): `STORAGE_CLAIM`, `SIGNER_ADD`, `SIGNER_REMOVE`, `ACCOUNT_DATA`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `USERNAME_CREATE`, `USERNAME_UPDATE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `PROJECT_CREATE`, `PROJECT_REMOVE`, `FORK`.
 
 `PROJECT_CREATE`, `PROJECT_REMOVE`, and `FORK` are classified as account messages because they modify `project_count` on the account.
 
-**Project messages** (Phase 2, serial per-project group): `PROJECT_METADATA`, `PROJECT_ARCHIVE`, `REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`. Grouped by target `project_id`, groups iterated in byte-lexicographic order of the 32-byte `project_id`. Within each group, messages are processed in the order specified by the proposer and carried authoritatively in `ExecutionPayload.project_messages`; the block's `ShardChunk.txns[*].user_messages` copy MUST match.
+**Project messages** (Phase 2, serial per-project group): `PROJECT_METADATA`, `PROJECT_ARCHIVE`, `REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`. Grouped by target `project_id`, groups iterated in byte-lexicographic order of the 32-byte `project_id`. Within each group, messages are processed in the order specified by the proposer and carried authoritatively in `ExecutionPayload.project_messages`; the grouping recovered from `Block.body.user_messages` (by `project_id`) MUST match.
 
 Dropped messages are excluded from the committed block but do not halt execution.
 
@@ -999,19 +999,19 @@ This leaves 287 usable bytes. The maximum `ref_name` length is 254 bytes (prefix
 
 ### 6.3 State Proofs
 
-The state store supports three proof surfaces anchored to committed state roots:
+The state store supports operation (inclusion) and exclusion proofs anchored to committed state roots, plus light-client message-inclusion proofs.
 
-The public proof RPC surface for these queries is [`GetOperationProof`](../proto/makechain.proto), [`GetExclusionProof`](../proto/makechain.proto), [`VerifyOperationProof`](../proto/makechain.proto), [`VerifyExclusionProof`](../proto/makechain.proto), [`VerifyOperationProofAtBlock`](../proto/makechain.proto), [`VerifyExclusionProofAtBlock`](../proto/makechain.proto), [`GetStorageQuotaProof`](../proto/makechain.proto), and [`GetCompoundProof`](../proto/makechain.proto).
+Proof generation is a single polymorphic RPC, [`GetStateProof`](../proto/makechain.proto): it takes a set of keys and returns, per key, an operation proof (key present, with value) or an exclusion proof (key absent) — all against one shared committed root. Compound and storage-quota assertions are **composed by the caller** by requesting the relevant keys together in a single `GetStateProof` call so they share that root; they are no longer separate RPCs. Verification RPCs [`VerifyOperationProof`](../proto/makechain.proto) / [`VerifyExclusionProof`](../proto/makechain.proto) check against the current committed root, and [`VerifyOperationProofAtBlock`](../proto/makechain.proto) / [`VerifyExclusionProofAtBlock`](../proto/makechain.proto) against the retained finalized root of an explicit `block_number`. Light clients prove message inclusion against `BlockHeader.transactions_root` via [`GetMessageInclusionProof`](../proto/makechain.proto).
 
 - **Operation proof** — proves a key-value pair exists at a given root (Merkle inclusion path).
 - **Exclusion proof** — proves a key does NOT exist at a given root (neighboring key boundary).
-- **Compound proof** — atomically proves the active key, tombstone key, and prune-marker key for a 2P-set member against a single root.
+- **Compound assertion** — a 2P-set member's active key, tombstone key, and prune-marker key proven together (one `GetStateProof` call, one root).
 
 `VerifyOperationProof` and `VerifyExclusionProof` verify against the current committed root only. Stale proofs MUST be rejected.
 
 `VerifyOperationProofAtBlock` and `VerifyExclusionProofAtBlock` verify against the retained finalized root of an explicit `block_number`. They MUST fail if the requested block is unknown, unavailable, or no longer retained, and MUST NOT silently fall back to the current root.
 
-Active membership in 2P sets can be established either by separate operation/exclusion proofs against the same root or by a single compound proof. A compound proof reports an entry as active iff the active key exists and `added_at > max(tombstone_at, prune_marker_at)`, with missing removal timestamps treated as absent.
+Active membership in 2P sets is established by proving the active key, tombstone key, and prune-marker key together against the same root — requested in one `GetStateProof` call. The entry is active iff the active key exists and `added_at > max(tombstone_at, prune_marker_at)`, with missing removal timestamps treated as absent.
 
 The statement above describes the protocol-level proof model. The public proof allowlists are intentionally narrower than the full state namespace and must match the current V2 proof contract.
 
@@ -1031,7 +1031,7 @@ Proofs over username-index keys prove persisted state only. Inclusion or exclusi
 
 **Storage quota proof:** Authenticates the complete active storage-grant suffix for an `owner_address` at an explicit `as_of_unix_time` against the current root, authenticates the account row used to derive username-gated usable quota, and, when raw active grants are positive and the account row carries a username, authenticates the matching username-index row. A grant is **active** at time `T` if and only if `expires_at > T`. Because the storage grant key layout (Section 6.1, prefix `0x16`) embeds `expires_at` in big-endian immediately after `owner_address`, all grants for a given account are sorted by expiration time in ascending order, enabling efficient range-based proof construction. It is not a historical-state proof — it proves raw active grants and quota implied by the current root evaluated at the given time. Future timestamps MUST be rejected.
 
-`GetStorageQuotaProofResponse` MUST additionally carry:
+A storage-quota proof is composed as a single `GetStateProof` over the active grant-suffix keys (prefix `0x16`) together with the account key and, when applicable, the username-index key, all against one `root`. From that proof set the caller derives and verifies:
 
 - `account_value` — the encoded `AccountState` for `account(owner_address)`
 - `account_proof` — an operation proof authenticating `account(owner_address)` at `root`
@@ -1051,7 +1051,9 @@ Quota-proof verification is:
 
 ### 6.4 Merkle State
 
-Committed state is stored in a merkleized key-value store. Validators execute each block against a copy-on-write overlay, then merkleize the resulting write-set to produce the committed `state_root`.
+Committed state is stored in a merkleized key-value store (QMDB). Validators execute each block against a copy-on-write overlay, then merkleize the resulting write-set to produce the committed `state_root`. `BlockHeader.state_root` is this canonical post-execution QMDB state root.
+
+`BlockHeader.ops_root` (with `ops_range_start` / `ops_range_end`) is a **separate** QMDB ops-only MMR root and op-count range that serves as the witness-free, proof-verified **sync target** — the values a syncing node needs to reconstruct a `qmdb::sync::Target` from a block header alone. It is additional to `state_root`, not a replacement, and is zero on blocks built without a merkleized batch (genesis, tests, sync-replayed bodies).
 
 The canonical state root authenticates all durable protocol state and secondary indexes. It does **not** commit to a per-message history index.
 
@@ -1066,7 +1068,7 @@ These checks require no state lookups and MUST be performed before any state acc
 - `MessageData.owner_address` MUST be exactly 20 bytes
 - `MessageData.network` MUST be a supported network identifier
 - at external admission points, `MessageData.network` MUST match the local configured network
-- during replay and block execution, `MessageData.network` MUST equal the active chain network carried by the executing `BlockHeader.chain_id`
+- during replay and block execution, `MessageData.network` MUST equal the network the node is validating — chain identity is bound by the chainspec and the network-scoped consensus signing namespace, not a per-block header field
 - exactly one `MessageData.body` variant MUST be present and MUST match `MessageData.type`
 - `MESSAGE_TYPE_NONE` is invalid
 
@@ -1139,27 +1141,46 @@ Validators are initially a permissioned set.
 
 ```
 Block {
-  header:     BlockHeader
-  hash:       bytes(32)             // H(canonical_encode(header))
-  witness:    ShardWitness
-  commits:    Commits               // Validator signatures
-  chunks:     ShardChunk[]          // Transaction data (single chunk)
-  consensus_finalization: bytes     // Simplex finalization certificate
+  header: BlockHeader   // chain-link fields; light clients verify headers alone
+  body:   BlockBody     // application data
 }
 
 BlockHeader {
-  height:      { shard_index: 0, block_number: uint64 }
-  timestamp:   uint64               // Proposer's wall-clock time (unix seconds)
-  version:     uint32
-  chain_id:    Network
-  parent_hash: bytes(32)            // H(previous block header)
-  state_root:  bytes(32)            // Merkle root after execution
+  height:            { block_number: uint64 }  // single-chain; shard_index reserved
+  timestamp:         uint64               // Proposer's wall-clock time (unix seconds)
+  parent_hash:       bytes(32)            // parent block hash
+  state_root:        bytes(32)            // canonical merkleized state root after executing this block
+  ops_root:          bytes(32)            // QMDB ops-only MMR root
+  ops_range_start:   uint64               // committed op range (sync target)
+  ops_range_end:     uint64
+  transactions_root: bytes                // BLAKE3 BMT root over message hashes (account first, then user); empty when no messages
+  dkg_outcome_hash:  bytes(32)            // header-binds body.dkg_outcome
+  dealer_log_hash:   bytes(32)            // header-binds body.dealer_log
+  context:           ConsensusContext     // round epoch/view, leader, parent view
+  // version and chain_id are NOT per-block fields (reserved) — see Protocol Versioning below
+}
+
+BlockBody {
+  user_messages:          Message[]   // flat user stream; per-project grouping recovered via project_id
+  account_messages:       Message[]   // account-level messages (serial pre-pass)
+  consensus_finalization: bytes       // commonware-codec Finalization<ed25519, BlockDigest>
+  dealer_log:             bytes        // raw SignedDealerLog bytes (late-phase non-boundary blocks); header-bound
+  dkg_outcome:            bytes        // canonical OnchainDkgOutcome bytes (boundary blocks); header-bound
+}
+
+ConsensusContext {
+  round_epoch:       uint64
+  round_view:        uint64
+  leader_public_key: bytes(32)
+  parent_view:       uint64
 }
 ```
 
-The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](../proto/makechain.proto). The corresponding protobuf messages are [`Block`](../proto/makechain.proto), [`BlockHeader`](../proto/makechain.proto), and [`ExecutionPayload`](../proto/makechain.proto).
+The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](../proto/makechain.proto): [`Block`](../proto/makechain.proto), [`BlockHeader`](../proto/makechain.proto), [`BlockBody`](../proto/makechain.proto), [`ConsensusContext`](../proto/makechain.proto), and [`ExecutionPayload`](../proto/makechain.proto).
 
-`consensus_finalization` commits to the digest of the associated [`ExecutionPayload`](../proto/makechain.proto), which is the canonical execution input:
+**Block hash.** The block hash is `keccak256(commonware_codec(header))` — keccak256 (not BLAKE3) so headers are compatible with Ethereum tooling, light clients, and EIP-1186 state proofs. Message-envelope and content hashing remain BLAKE3. The header carries the chain-link fields (height, timestamp, parent_hash, state_root, ops_root, transactions_root, dkg/dealer-log hashes, context), so header verification does not decode the body and light clients can fetch headers alone. The body is content-addressed by the header: `state_root` covers state, `transactions_root` covers the message set, and `dkg_outcome_hash` / `dealer_log_hash` cover the DKG/dealer-log bytes.
+
+`body.consensus_finalization` commits to `proposal_digest(R)`, the canonical block hash reconstructed from the associated [`ExecutionPayload`](../proto/makechain.proto), the canonical execution input:
 
 ```
 ExecutionPayload {
@@ -1169,36 +1190,45 @@ ExecutionPayload {
   timestamp:         uint64
   block_number:      uint64
   parent_hash:       bytes(32)
-  chain_id:          uint32
-  version:           uint32
-  reshare:           ResharePayload?  // Optional DKG/reshare data committed with the block
+  chain_id:          uint32            // proto::Network enum value
+  version:           uint32            // execution-payload version (= 6); see Protocol Versioning
+  dealer_log:        bytes             // raw SignedDealerLog bytes (late-phase non-boundary blocks)
+  dkg_outcome:       bytes             // canonical OnchainDkgOutcome bytes (boundary blocks)
+  ops_root:          bytes(32)         // QMDB ops-only MMR root, stamped into BlockHeader.ops_root
+  ops_range_start:   uint64
+  ops_range_end:     uint64
 }
 ```
 
-The finalized block header authenticates the post-execution state root; the finalized payload authenticates the exact executed message sequence. `proposal_digest(R)` refers to the hash of the canonical [`ExecutionPayload`](../proto/makechain.proto) encoding, not to the `digest` field inside `R`.
+There is no `reshare` / `ResharePayload`; DKG and dealer-log evidence travel as the separate `dealer_log` and `dkg_outcome` byte fields, each header-bound by its hash.
+
+The finalized block header authenticates the post-execution state root and — via `transactions_root` — the exact executed message set; the associated payload carries the message sequence. `proposal_digest(R)` is the canonical block hash of the block reconstructed from `R` (see below), not the `digest` field inside `R`.
 
 #### Proposal Digest Construction
 
-`proposal_digest(R)` is computed as:
+The value validators sign in finalization certificates is the **canonical block hash** of the block reconstructed from the execution payload `R`:
 
 ```
-let wire = canonical_encode(ExecutionPayload_proto(R))
-proposal_digest(R) = H(b"makechain:execution-payload:v2" || len(wire) as uint64 LE || wire)
+block = reconstruct_block(R)   // header + body from R: parent_hash, height, timestamp,
+                               // network, state_root, account + per-project messages,
+                               // dealer_log, dkg_outcome, consensus context, then the
+                               // ops-target fields (ops_root, ops_range_start/end)
+proposal_digest(R) = keccak256(commonware_codec(block.header))   // == compute_block_hash(block) == block.digest()
 ```
 
 Where:
-- `ExecutionPayload_proto(R)` converts the logical `ExecutionPayload` to its Protocol Buffers message form.
-- `canonical_encode` follows the determinism rules in Appendix B.1.
-- `len(wire)` is the byte length of the encoded protobuf, serialized as an 8-byte unsigned little-endian integer.
-- The domain separator `b"makechain:execution-payload:v2"` prevents cross-protocol hash collisions and distinguishes version-6 payload commitments that include optional reshare data.
+- `reconstruct_block(R)` rebuilds the `proto::Block` the proposer assembled and stamps the `ops_root` / `ops_range_*` sync-target fields before hashing.
+- The digest is the canonical block hash from Appendix B.3 (keccak256 over the `commonware-codec`-encoded `BlockHeader`).
+- Hashing the header alone commits to the full block: the header's `transactions_root` (BLAKE3 BMT over the block's message hashes), `state_root`, `dkg_outcome_hash`, and `dealer_log_hash` bind the message set, state, and DKG/dealer-log bytes respectively.
+- Implementations retain a legacy domain-separated BLAKE3 digest of the encoded `ExecutionPayload` — `H(b"makechain:execution-payload:v2" || len(wire) as uint64 LE || wire)` — **only** as a fallback when block reconstruction fails; it is not the signed consensus commitment.
 
 The [`ProjectMessages`](../proto/makechain.proto) entries in `project_messages` MUST be ordered by byte-lexicographic `project_id`, matching the `BTreeMap` iteration order in the reference implementation.
 
-Persisted block verification therefore requires both the finalized [`Block`](../proto/makechain.proto) and the exact associated [`ExecutionPayload`](../proto/makechain.proto). A sync provider serving historical blocks MUST also serve that payload, and a syncing node MUST verify that the served `(Block, ExecutionPayload)` pair yields the payload digest committed by `consensus_finalization`.
+Persisted block verification therefore requires both the finalized [`Block`](../proto/makechain.proto) and the exact associated [`ExecutionPayload`](../proto/makechain.proto). A sync provider serving historical blocks MUST also serve that payload, and a syncing node MUST verify that the served `(Block, ExecutionPayload)` pair yields the canonical block hash committed by `consensus_finalization`.
 
-The `proposal_digest(R)` value is what validators sign in finalization certificates. The domain separator `b"makechain:execution-payload:v2"` serves as the commitment version identifier. Future commitment format changes MUST use a new domain separator (e.g., `v3`) and require explicit activation semantics.
+The `proposal_digest(R)` value — the canonical block hash — is what validators sign in finalization certificates. Because it is the block hash, the finalization certificate commits to the block header (and, transitively, the full block content), giving light clients an Ethereum-compatible commitment.
 
-> **Protocol Versioning:** The clean-slate reset network uses a single canonical protocol rule set and a fixed transport version. `BlockHeader.version` and `ExecutionPayload.version` MUST both equal `6`. Replay, sync, and persisted-block verification MUST use the committed block contents and fixed protocol version, not any hardfork activation schedule. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check and block execution remains authoritative.
+> **Protocol Versioning:** The clean-slate reset network uses a single canonical protocol rule set. Protocol-version dispatch is derived from block **height** via chainspec hardfork activation (`ConsensusConfig::hardfork_at(height)`), not from any proposer-supplied field — `BlockHeader` carries no `version` (and no `chain_id`); both proto fields are reserved. Today `Hardfork::Genesis` is the only variant. `ExecutionPayload.version` remains on the wire and MUST equal `6` for post-reset blocks, but it is a payload-format tag, not the dispatch source. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check; block execution remains authoritative.
 
 ### 8.3 Empty Blocks
 
@@ -1301,7 +1331,7 @@ The public RPC surface includes:
 
 `MergeRequestSummary` includes `request_id`, `project_id`, `requester_owner_address`, `source_project_id`, `source_ref`, `source_commit_hash`, `target_ref`, `title`, and `added_at`.
 
-Generic message surfaces keyed by `MessageType`, including `ListMessages`, `GetProjectActivity`, `GetAccountActivity`, and `SubscribeMessages`, MUST recognize `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE`. For project-filtered generic surfaces, both message types are associated with the target `project_id`.
+Generic message surfaces keyed by `MessageType`, including `ListMessages`, the unified [`GetActivity`](../proto/makechain.proto) feed (`scope` = `PROJECT` / `ACCOUNT` / `GLOBAL`, with the matching identifier in `scope_id`), and `SubscribeMessages`, MUST recognize `MERGE_REQUEST_ADD` and `MERGE_REQUEST_REMOVE`. For project-scoped (`scope = PROJECT`) generic surfaces, both message types are associated with the target `project_id`.
 
 Closure attribution is historical rather than canonical-state derived: clients that need to distinguish requester withdrawal from maintainer closure MUST inspect finalized `MERGE_REQUEST_REMOVE` history for the same `(project_id, request_id)` pair and compare the closer's `owner_address` with the original requester.
 
@@ -1320,8 +1350,10 @@ Messages accepted into the local mempool are forwarded to all connected validato
 ### 10.3 Sync
 
 New nodes joining the network:
-1. **State sync** — proof-verified download of the current state from a peer via [`GetSyncTarget`](../proto/makechain.proto) and [`SyncFetch`](../proto/makechain.proto).
-2. **Block sync** — replay missed finalized `(Block, ExecutionPayload)` pairs from the state sync height to the current tip via [`SyncBlocks`](../proto/makechain.proto). The execution payload is consensus-critical because it carries the exact committed account-message order and project-message grouping.
+1. **State sync** — a cold-start node selects a finalized sync target via the [`GetSyncTarget`](../proto/makechain.proto) gRPC RPC (which returns the ops-only MMR root, the canonical state root, the finalization certificate, and the boundary block + execution payload), then proof-verifies and downloads QMDB state over the dedicated commonware-p2p QMDB-sync channel. The bulk state transfer is **not** a gRPC RPC; it runs on the p2p channel, so there is no `SyncFetch` service method.
+2. **Block sync** — once state is in place, a node fills the gap to the tip by replaying finalized `(Block, ExecutionPayload)` pairs streamed via [`SubscribeBlocks`](../proto/makechain.proto) (falling back to polling [`GetBlock`](../proto/makechain.proto)); there is no dedicated `SyncBlocks` RPC. The execution payload is consensus-critical because it carries the exact committed account-message order and project-message grouping.
+
+Auxiliary query surfaces support sync and verification: [`GetEpochState`](../proto/makechain.proto) returns the DKG group public key + verifier set for a late rejoin (no secrets), [`GetStateAttestation`](../proto/makechain.proto) returns a quorum certificate over the certified QMDB root at a height, and [`GetFinalizationCertificate`](../proto/makechain.proto) returns the direct finalization certificate for a block by digest.
 
 ### 10.4 Follower Nodes
 
@@ -1442,12 +1474,14 @@ Specification versions use [CalVer](https://calver.org/) (`YYYY.M.PATCH`). Each 
 
 **Protocol versioning** for the clean-slate reset network is fixed.
 
-### 13.1 Fixed Transport Version
+### 13.1 Protocol Version Dispatch
 
-- `BlockHeader.version = 6`
-- `ExecutionPayload.version = 6`
+Protocol version is **derived from block height** via chainspec hardfork activation, never carried in a proposer-supplied block field. The runtime resolves the active rule set with `ConsensusConfig::hardfork_at(height)`, which returns the highest-activation hardfork whose threshold is `≤ height` (implicit `Hardfork::Genesis` floor at height 0). `Hardfork::Genesis` is the only variant today — the clean-slate reset network has shipped no real hardfork; future hardforks add a chainspec activation height, not a wire `version` field.
 
-`ExecutionPayload.version` MUST mirror the committed block header version. A node MUST fail closed if either field does not match the fixed protocol version required by this specification.
+- `BlockHeader` carries **no** `version` and **no** `chain_id` (both proto fields are reserved). A proposer cannot influence version dispatch.
+- `ExecutionPayload.version` remains on the wire as a payload-format tag and MUST equal `6` for post-reset blocks; it is not the version-dispatch source.
+
+A node MUST dispatch block verification, execution, replay, and sync from `hardfork_at(height)`, and MUST reject an `ExecutionPayload` whose `version` is not `6`.
 
 ### 13.2 Replay and Admission Semantics
 
@@ -1556,17 +1590,17 @@ The reference implementation uses Rust's `serde_json` library. Independent imple
 
 ### B.3 Block Hash
 
-Block hash: `H(canonical_encode(BlockHeader))` where `canonical_encode` follows the same protobuf determinism rules as [`MessageData`](../proto/makechain.proto) encoding; see [`BlockHeader`](../proto/makechain.proto).
+Block hash: `keccak256(canonical_encode(BlockHeader))` where `canonical_encode` follows the same `commonware-codec` determinism rules as [`MessageData`](../proto/makechain.proto) encoding; see [`BlockHeader`](../proto/makechain.proto). The block hash uses **keccak256** (not BLAKE3) for Ethereum-tooling / light-client / EIP-1186 compatibility; the `MessageData` envelope hash and content-addressed identifiers (project IDs, commit hashes) remain BLAKE3.
 
 ### B.4 Proposal Digest
 
-The proposal digest committed by `consensus_finalization` is a domain-separated BLAKE3 hash of the canonical protobuf encoding of [`ExecutionPayload`](../proto/makechain.proto):
+The proposal digest committed by `consensus_finalization` is the **canonical block hash** of the block reconstructed from the execution payload `R`:
 
 ```
-proposal_digest(R) = H(b"makechain:execution-payload:v2" || len(wire) as uint64 LE || wire)
+proposal_digest(R) = keccak256(commonware_codec(block.header))   // == compute_block_hash(block)
 ```
 
-where `wire = canonical_encode(ExecutionPayload_proto(R))` following the rules in B.1. The length prefix prevents ambiguity between the domain separator and the payload bytes.
+The header's `transactions_root` binds the block's message set, so hashing the header commits to the full block. A domain-separated BLAKE3 digest of the encoded `ExecutionPayload` (`H(b"makechain:execution-payload:v2" || len || wire)`, where `wire` is the canonical `commonware-codec` encoding) is retained only as a reconstruction-failure fallback, not as the signed commitment.
 
 Field ordering within the [`ProjectMessages`](../proto/makechain.proto) entries in `project_messages` is consensus-critical: entries MUST appear in byte-lexicographic order of their 32-byte `project_id`. Implementations that do not guarantee this ordering will produce a different digest and fail verification.
 
@@ -1665,7 +1699,7 @@ The genesis state `σ₀` is the empty key-value store. No pre-registered accoun
 - `parent_hash = [0; 32]` (all zeros)
 - `state_root` = the merkle root of the empty store
 - `timestamp = 0`
-- `BlockHeader.version = 6`
+- `BlockHeader` carries no `version` field (version is height-dispatched; see §13.1)
 - `ExecutionPayload.version = 6`
 - No messages
 
@@ -1677,6 +1711,7 @@ Validator identity is configured out-of-band via node configuration, not via gen
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2026.6.1 | 2026-06-05 | **Non-custody spec↔implementation alignment** (documents already-shipped behavior; no semantic change). Block model (§4.2/§8.2/Appendix B/E): `Block = { header, body }` with `BlockBody` + `ConsensusContext`; `ShardChunk`/`ShardWitness`/`chunks` removed; `BlockHeader` drops per-block `version`/`chain_id` and adds `context`/`dkg_outcome_hash`/`dealer_log_hash`/`transactions_root`/`ops_root`/`ops_range_*`; block hash is keccak256(`commonware_codec`(header)) (envelope/content stay BLAKE3); `consensus_finalization` signs that canonical block hash (the header's `transactions_root` binds the message set), not a BLAKE3-of-`ExecutionPayload` digest; `state_root` is the canonical post-execution QMDB root and `ops_root` is a separate QMDB ops-only MMR sync target; `ExecutionPayload` replaces `reshare` with `dealer_log`+`dkg_outcome`. Versioning (§13.1): protocol version is height-dispatched via chainspec `hardfork_at`, not a per-block field. Proofs (§6.3): four `Get*Proof` RPCs consolidated into polymorphic `GetStateProof`; added `GetMessageInclusionProof`. Sync (§10.3): `GetSyncTarget` + p2p QMDB-sync channel (no `SyncFetch`/`SyncBlocks` RPCs); added `GetEpochState`/`GetStateAttestation`/`GetFinalizationCertificate`. Unified `GetActivity` feed. `proto/makechain.proto` synced to the shipped canonical proto except for corrected non-semantic block-hash comments. |
 | 2026.6.0 | 2026-06-04 | **Breaking — AccountKeychain custody model (V2 clean break, chain wipe).** Removed ERC-1271 custody and verification entirely (no `custody_key_type` / `request_key_type` / `claim_key_type` / block-hash fields; corresponding proto fields reserved; removed `MAX_CONTRACT_SIGNATURE_LEN`). Custody and signer-management authorization (`SIGNER_ADD`, `SIGNER_REMOVE`, and new `KEYCHAIN_AUTHORIZE` (25) / `KEYCHAIN_REVOKE` (26)) now use native `Keccak256(commonware_codec(...))` digests with an operation byte and a target key-family byte — not EIP-712. Introduced the custody-key family: the `0x06` keyspace is now `[0x06 \| owner_address:20 \| family:1 \| key_id]` (family `0x00` envelope, `0x01` custody); the root `owner_address` is the implicit admin forever and is never stored as a custody key; custody keys follow a never-seen → active → revoked lifecycle with permanent tombstones. Custody signatures use one self-describing envelope (65=secp256k1, `0x01`=P256, `0x02`=WebAuthn, `0x03 \| account:20 \| primitive`=keychain wrapper); nested wrappers and high-S rejected; WebAuthn origin/RP-ID not enforced. `ETH_ADDRESS` verification claims keep the EIP-712 `VerificationClaim` hash but verify a direct unified-envelope signature locally (no ERC-1271); `MAX_CLAIM_SIGNATURE_LEN` is 16,384 bytes. `custody_nonce` is the shared replay guard across all four custody operations, burned only on the mutated account. |
 | 2026.5.3 | 2026-04-23 | Bump the clean-slate transport version to `6` and commit optional DKG/reshare payloads in `ExecutionPayload.reshare`, making reshare data part of the finalized proposal digest and persisted block-payload pair. |
 | 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's usable storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
