@@ -1345,8 +1345,10 @@ Messages accepted into the local mempool are forwarded to all connected validato
 ### 10.3 Sync
 
 New nodes joining the network:
-1. **State sync** — proof-verified download of the current state from a peer via [`GetSyncTarget`](../proto/makechain.proto) and [`SyncFetch`](../proto/makechain.proto).
-2. **Block sync** — replay missed finalized `(Block, ExecutionPayload)` pairs from the state sync height to the current tip via [`SyncBlocks`](../proto/makechain.proto). The execution payload is consensus-critical because it carries the exact committed account-message order and project-message grouping.
+1. **State sync** — a cold-start node selects a finalized sync target via the [`GetSyncTarget`](../proto/makechain.proto) gRPC RPC (which returns the ops-only MMR root, the canonical state root, the finalization certificate, and the boundary block + execution payload), then proof-verifies and downloads QMDB state over the dedicated commonware-p2p QMDB-sync channel. The bulk state transfer is **not** a gRPC RPC; it runs on the p2p channel, so there is no `SyncFetch` service method.
+2. **Block sync** — once state is in place, a node fills the gap to the tip by replaying finalized `(Block, ExecutionPayload)` pairs streamed via [`SubscribeBlocks`](../proto/makechain.proto) (falling back to polling [`GetBlock`](../proto/makechain.proto)); there is no dedicated `SyncBlocks` RPC. The execution payload is consensus-critical because it carries the exact committed account-message order and project-message grouping.
+
+Auxiliary query surfaces support sync and verification: [`GetEpochState`](../proto/makechain.proto) returns the DKG group public key + verifier set for a late rejoin (no secrets), [`GetStateAttestation`](../proto/makechain.proto) returns a quorum certificate over the certified QMDB root at a height, and [`GetFinalizationCertificate`](../proto/makechain.proto) returns the direct finalization certificate for a block by digest.
 
 ### 10.4 Follower Nodes
 
