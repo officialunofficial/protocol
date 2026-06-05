@@ -391,13 +391,13 @@ apply_block(σ, B, R) → σ':
   return σ₂
 ```
 
-`ExecutionPayload` is the canonical execution input. Verifiers MUST execute the exact `account_messages` and `project_messages` order carried in `R`. `Block.chunks[*].txns[*].user_messages` redundantly mirror the finalized per-project message groups for persisted verification, sync, and indexing; account-message order is carried only by `ExecutionPayload.account_messages`. Each `project_id` MUST appear at most once in `ExecutionPayload.project_messages`; duplicate entries make the payload invalid. If the block's mirrored per-project messages differ from `ExecutionPayload.project_messages`, the block is invalid.
+`ExecutionPayload` is the canonical execution input. Verifiers MUST execute the exact `account_messages` and `project_messages` order carried in `R`. `Block.body.user_messages` is a flat stream that redundantly mirrors the finalized user messages for persisted verification, sync, and indexing; per-project groups are recovered on demand from each message's `project_id`. Account-message order is carried only by `ExecutionPayload.account_messages` (mirrored in `Block.body.account_messages`). Each `project_id` MUST appear at most once in `ExecutionPayload.project_messages`; duplicate entries make the payload invalid. If the block body's per-project grouping differs from `ExecutionPayload.project_messages`, the block is invalid.
 
 **Account messages** (Phase 1, serial): `STORAGE_CLAIM`, `SIGNER_ADD`, `SIGNER_REMOVE`, `ACCOUNT_DATA`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `USERNAME_CREATE`, `USERNAME_UPDATE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `PROJECT_CREATE`, `PROJECT_REMOVE`, `FORK`.
 
 `PROJECT_CREATE`, `PROJECT_REMOVE`, and `FORK` are classified as account messages because they modify `project_count` on the account.
 
-**Project messages** (Phase 2, serial per-project group): `PROJECT_METADATA`, `PROJECT_ARCHIVE`, `REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`. Grouped by target `project_id`, groups iterated in byte-lexicographic order of the 32-byte `project_id`. Within each group, messages are processed in the order specified by the proposer and carried authoritatively in `ExecutionPayload.project_messages`; the block's `ShardChunk.txns[*].user_messages` copy MUST match.
+**Project messages** (Phase 2, serial per-project group): `PROJECT_METADATA`, `PROJECT_ARCHIVE`, `REF_UPDATE`, `REF_DELETE`, `COMMIT_BUNDLE`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`. Grouped by target `project_id`, groups iterated in byte-lexicographic order of the 32-byte `project_id`. Within each group, messages are processed in the order specified by the proposer and carried authoritatively in `ExecutionPayload.project_messages`; the grouping recovered from `Block.body.user_messages` (by `project_id`) MUST match.
 
 Dropped messages are excluded from the committed block but do not halt execution.
 
@@ -1139,27 +1139,46 @@ Validators are initially a permissioned set.
 
 ```
 Block {
-  header:     BlockHeader
-  hash:       bytes(32)             // H(canonical_encode(header))
-  witness:    ShardWitness
-  commits:    Commits               // Validator signatures
-  chunks:     ShardChunk[]          // Transaction data (single chunk)
-  consensus_finalization: bytes     // Simplex finalization certificate
+  header: BlockHeader   // chain-link fields; light clients verify headers alone
+  body:   BlockBody     // application data
 }
 
 BlockHeader {
-  height:      { shard_index: 0, block_number: uint64 }
-  timestamp:   uint64               // Proposer's wall-clock time (unix seconds)
-  version:     uint32
-  chain_id:    Network
-  parent_hash: bytes(32)            // H(previous block header)
-  state_root:  bytes(32)            // Merkle root after execution
+  height:            { block_number: uint64 }  // single-chain; shard_index reserved
+  timestamp:         uint64               // Proposer's wall-clock time (unix seconds)
+  parent_hash:       bytes(32)            // parent block hash
+  state_root:        bytes(32)            // K-lag DSMR MMR root after execution
+  ops_root:          bytes(32)            // QMDB ops-only MMR root
+  ops_range_start:   uint64               // committed op range (sync target)
+  ops_range_end:     uint64
+  transactions_root: bytes                // BLAKE3 BMT root over message hashes (account first, then user); empty when no messages
+  dkg_outcome_hash:  bytes(32)            // header-binds body.dkg_outcome
+  dealer_log_hash:   bytes(32)            // header-binds body.dealer_log
+  context:           ConsensusContext     // round epoch/view, leader, parent view
+  // version and chain_id are NOT per-block fields (reserved) — see Protocol Versioning below
+}
+
+BlockBody {
+  user_messages:          Message[]   // flat user stream; per-project grouping recovered via project_id
+  account_messages:       Message[]   // account-level messages (serial pre-pass)
+  consensus_finalization: bytes       // commonware-codec Finalization<ed25519, BlockDigest>
+  dealer_log:             bytes        // raw SignedDealerLog bytes (late-phase non-boundary blocks); header-bound
+  dkg_outcome:            bytes        // canonical OnchainDkgOutcome bytes (boundary blocks); header-bound
+}
+
+ConsensusContext {
+  round_epoch:       uint64
+  round_view:        uint64
+  leader_public_key: bytes(32)
+  parent_view:       uint64
 }
 ```
 
-The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](../proto/makechain.proto). The corresponding protobuf messages are [`Block`](../proto/makechain.proto), [`BlockHeader`](../proto/makechain.proto), and [`ExecutionPayload`](../proto/makechain.proto).
+The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](../proto/makechain.proto): [`Block`](../proto/makechain.proto), [`BlockHeader`](../proto/makechain.proto), [`BlockBody`](../proto/makechain.proto), [`ConsensusContext`](../proto/makechain.proto), and [`ExecutionPayload`](../proto/makechain.proto).
 
-`consensus_finalization` commits to the digest of the associated [`ExecutionPayload`](../proto/makechain.proto), which is the canonical execution input:
+**Block hash.** The block hash is `keccak256(commonware_codec(header))` — keccak256 (not BLAKE3) so headers are compatible with Ethereum tooling, light clients, and EIP-1186 state proofs. Message-envelope and content hashing remain BLAKE3. The header carries the chain-link fields (height, timestamp, parent_hash, state_root, ops_root, transactions_root, dkg/dealer-log hashes, context), so header verification does not decode the body and light clients can fetch headers alone. The body is content-addressed by the header: `state_root` covers state, `transactions_root` covers the message set, and `dkg_outcome_hash` / `dealer_log_hash` cover the DKG/dealer-log bytes.
+
+`body.consensus_finalization` commits to the digest of the associated [`ExecutionPayload`](../proto/makechain.proto), the canonical execution input:
 
 ```
 ExecutionPayload {
@@ -1169,11 +1188,17 @@ ExecutionPayload {
   timestamp:         uint64
   block_number:      uint64
   parent_hash:       bytes(32)
-  chain_id:          uint32
-  version:           uint32
-  reshare:           ResharePayload?  // Optional DKG/reshare data committed with the block
+  chain_id:          uint32            // proto::Network enum value
+  version:           uint32            // execution-payload version (= 6); see Protocol Versioning
+  dealer_log:        bytes             // raw SignedDealerLog bytes (late-phase non-boundary blocks)
+  dkg_outcome:       bytes             // canonical OnchainDkgOutcome bytes (boundary blocks)
+  ops_root:          bytes(32)         // QMDB ops-only MMR root, stamped into BlockHeader.ops_root
+  ops_range_start:   uint64
+  ops_range_end:     uint64
 }
 ```
+
+There is no `reshare` / `ResharePayload`; DKG and dealer-log evidence travel as the separate `dealer_log` and `dkg_outcome` byte fields, each header-bound by its hash.
 
 The finalized block header authenticates the post-execution state root; the finalized payload authenticates the exact executed message sequence. `proposal_digest(R)` refers to the hash of the canonical [`ExecutionPayload`](../proto/makechain.proto) encoding, not to the `digest` field inside `R`.
 
@@ -1190,7 +1215,7 @@ Where:
 - `ExecutionPayload_proto(R)` converts the logical `ExecutionPayload` to its Protocol Buffers message form.
 - `canonical_encode` follows the determinism rules in Appendix B.1.
 - `len(wire)` is the byte length of the encoded protobuf, serialized as an 8-byte unsigned little-endian integer.
-- The domain separator `b"makechain:execution-payload:v2"` prevents cross-protocol hash collisions and distinguishes version-6 payload commitments that include optional reshare data.
+- The domain separator `b"makechain:execution-payload:v2"` prevents cross-protocol hash collisions and distinguishes version-6 payload commitments, which include the optional `dealer_log` / `dkg_outcome` bytes.
 
 The [`ProjectMessages`](../proto/makechain.proto) entries in `project_messages` MUST be ordered by byte-lexicographic `project_id`, matching the `BTreeMap` iteration order in the reference implementation.
 
@@ -1198,7 +1223,7 @@ Persisted block verification therefore requires both the finalized [`Block`](../
 
 The `proposal_digest(R)` value is what validators sign in finalization certificates. The domain separator `b"makechain:execution-payload:v2"` serves as the commitment version identifier. Future commitment format changes MUST use a new domain separator (e.g., `v3`) and require explicit activation semantics.
 
-> **Protocol Versioning:** The clean-slate reset network uses a single canonical protocol rule set and a fixed transport version. `BlockHeader.version` and `ExecutionPayload.version` MUST both equal `6`. Replay, sync, and persisted-block verification MUST use the committed block contents and fixed protocol version, not any hardfork activation schedule. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check and block execution remains authoritative.
+> **Protocol Versioning:** The clean-slate reset network uses a single canonical protocol rule set. Protocol-version dispatch is derived from block **height** via chainspec hardfork activation (`ConsensusConfig::hardfork_at(height)`), not from any proposer-supplied field — `BlockHeader` carries no `version` (and no `chain_id`); both proto fields are reserved. Today `Hardfork::Genesis` is the only variant. `ExecutionPayload.version` remains on the wire and MUST equal `6` for post-reset blocks, but it is a payload-format tag, not the dispatch source. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check; block execution remains authoritative.
 
 ### 8.3 Empty Blocks
 
@@ -1442,12 +1467,14 @@ Specification versions use [CalVer](https://calver.org/) (`YYYY.M.PATCH`). Each 
 
 **Protocol versioning** for the clean-slate reset network is fixed.
 
-### 13.1 Fixed Transport Version
+### 13.1 Protocol Version Dispatch
 
-- `BlockHeader.version = 6`
-- `ExecutionPayload.version = 6`
+Protocol version is **derived from block height** via chainspec hardfork activation, never carried in a proposer-supplied block field. The runtime resolves the active rule set with `ConsensusConfig::hardfork_at(height)`, which returns the highest-activation hardfork whose threshold is `≤ height` (implicit `Hardfork::Genesis` floor at height 0). `Hardfork::Genesis` is the only variant today — the clean-slate reset network has shipped no real hardfork; future hardforks add a chainspec activation height, not a wire `version` field.
 
-`ExecutionPayload.version` MUST mirror the committed block header version. A node MUST fail closed if either field does not match the fixed protocol version required by this specification.
+- `BlockHeader` carries **no** `version` and **no** `chain_id` (both proto fields are reserved). A proposer cannot influence version dispatch.
+- `ExecutionPayload.version` remains on the wire as a payload-format tag and MUST equal `6` for post-reset blocks; it is not the version-dispatch source.
+
+A node MUST dispatch block verification, execution, replay, and sync from `hardfork_at(height)`, and MUST reject an `ExecutionPayload` whose `version` is not `6`.
 
 ### 13.2 Replay and Admission Semantics
 
@@ -1556,7 +1583,7 @@ The reference implementation uses Rust's `serde_json` library. Independent imple
 
 ### B.3 Block Hash
 
-Block hash: `H(canonical_encode(BlockHeader))` where `canonical_encode` follows the same protobuf determinism rules as [`MessageData`](../proto/makechain.proto) encoding; see [`BlockHeader`](../proto/makechain.proto).
+Block hash: `keccak256(canonical_encode(BlockHeader))` where `canonical_encode` follows the same `commonware-codec` determinism rules as [`MessageData`](../proto/makechain.proto) encoding; see [`BlockHeader`](../proto/makechain.proto). The block hash uses **keccak256** (not BLAKE3) for Ethereum-tooling / light-client / EIP-1186 compatibility; the `MessageData` envelope hash and content-addressed identifiers (project IDs, commit hashes) remain BLAKE3.
 
 ### B.4 Proposal Digest
 
@@ -1665,7 +1692,7 @@ The genesis state `σ₀` is the empty key-value store. No pre-registered accoun
 - `parent_hash = [0; 32]` (all zeros)
 - `state_root` = the merkle root of the empty store
 - `timestamp = 0`
-- `BlockHeader.version = 6`
+- `BlockHeader` carries no `version` field (version is height-dispatched; see §13.1)
 - `ExecutionPayload.version = 6`
 - No messages
 
