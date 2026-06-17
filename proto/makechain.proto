@@ -263,6 +263,7 @@ message StorageClaimBody {
   uint64 settlement_chain_id = 3;   // Host-chain EIP-155 chain id
   uint32 settlement_log_index = 4;  // Receipt-local log index
   bytes actor = 5;                  // 20-byte EVM address that paid or credited the settlement
+  uint32 settlement_block_timestamp = 6;  // Tempo settlement-block timestamp; submitter-supplied, validator-verified against Tempo, read by followers for deterministic replay
 }
 
 message UsernameCreateBody {
