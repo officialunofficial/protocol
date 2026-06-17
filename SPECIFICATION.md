@@ -1286,6 +1286,8 @@ Persisted-block replay verification is tri-state:
 
 Replay verification is message-local in V2. It applies only to message families that require external evidence, such as `STORAGE_CLAIM` settlement verification. Custody, signer-management, and verification-claim signatures require no external evidence and are fully verifiable from the message bytes alone.
 
+For `STORAGE_CLAIM`, only validators query Tempo: they verify the submitter-signed `settlement_block_timestamp` against the canonical Tempo block at verify-time. Non-validators (followers, readers, exporters) read that timestamp from the signed body and replay deterministically without any RPC, so `STORAGE_CLAIM` replay can yield `NotYetVerifiable` only on a validator performing live Tempo verification — never on a non-validator.
+
 Disabled relay-era message families remain invalid during replay and fail closed immediately.
 
 ### 9.5 Operator-Visible Status
