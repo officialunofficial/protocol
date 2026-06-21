@@ -133,7 +133,7 @@ scope(signer) ≤ required_scope(data.type)
 
 **Settlement-verified storage-funding messages** (`STORAGE_CLAIM`) — the Ed25519 envelope provides integrity, while authorization derives from finalized settlement verification against the claim coordinates and payload. If the claim marker already exists after successful settlement verification, execution is an idempotent no-op.
 
-For `STORAGE_CLAIM`, validators MUST first verify finalized settlement evidence against `owner_address`, `actor`, and `units`. If the claim marker already exists, execution is an idempotent no-op. First successful application does not require delegated-key authorization.
+For `STORAGE_CLAIM`, every node MUST verify the message's self-contained, in-band Tempo evidence (BLS finalization certificate + RLP header + receipts-trie inclusion proof) against the chainspec-pinned Tempo identity, with no Tempo RPC; `owner_address`, `actor`, and `units` are then derived from the proven `Rent` log rather than matched against submitter-supplied values. If the claim marker already exists, execution is an idempotent no-op. First successful application does not require delegated-key authorization.
 
 ### 2.2 MessageData
 
@@ -635,15 +635,23 @@ Pre-V2 relay-era families (`KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `REL
 
 ### 5.4A `STORAGE_CLAIM` Authorization
 
-`STORAGE_CLAIM` is the settlement-verified raw storage-funding ingress.
+`STORAGE_CLAIM` is the settlement-verified raw storage-funding ingress. Each message carries **self-contained Tempo evidence** — a BLS finalization certificate, the RLP block header, the settlement receipt, and the receipt's receipts-trie inclusion proof — and is authorized by a **pure, in-band verification function with zero Tempo RPC**. Every economic value (`actor`, `owner`, `units`, settlement timestamp) is **derived from the proof**, not submitter-supplied; trust reduces to "Tempo's threshold-BLS validator set is honest."
 
 ```
 authorize_storage_claim(σ, data, body) → FirstApply | DuplicateReplay | Err:
-  require finalized settlement verification succeeds and matches
-          (owner_address, actor, units)
+  // Pure in-band verification against the chainspec-pinned Tempo identity
+  // (b"TEMPO" namespace + per-network identity, for epoch >= from_epoch):
+  //   1. BLS-verify body.finalization_cert
+  //   2. keccak256(rlp(TempoHeader)) == cert.proposal.payload  (header binding)
+  //   3. receipts-trie inclusion of body.receipt_rlp at body.tx_index
+  //      under header.receipts_root
+  //   4. decode the Rent(actor, owner, units) log + header timestamp
+  require verify_storage_claim(network, body, pinned_tempo_identity) succeeds
 
+  let block_hash = cert.proposal.payload          // cert-committed Tempo block hash
   let claim_id = storage_claim_id(body.settlement_chain_id,
-                                  body.settlement_tx_hash,
+                                  block_hash,
+                                  body.tx_index,
                                   body.settlement_log_index)
 
   if storage_claim_marker(claim_id) exists:
@@ -652,7 +660,7 @@ authorize_storage_claim(σ, data, body) → FirstApply | DuplicateReplay | Err:
   return FirstApply
 ```
 
-Duplicate replay remains settlement-first and marker-idempotent: once the claim marker exists, no later delegated-key state can affect the replay outcome because no delegated-key lookup is performed.
+`claim_id` is built ONLY from cert-proven coordinates (`chain_id`, `block_hash`, `tx_index`, `log_index`) — never the unproven `settlement_tx_hash` (display-only) — so a relayer cannot mint duplicate grants from a single finalized settlement. The off-chain relayer (untrusted) only assembles + relays the evidence; it cannot forge a threshold-BLS certificate, so it can only withhold (a liveness effect, off the consensus path). Duplicate replay remains settlement-first and marker-idempotent: once the claim marker exists, no later delegated-key state can affect the replay outcome because no delegated-key lookup is performed.
 
 ### 5.4B Username Message Authorization
 
@@ -1092,7 +1100,7 @@ These checks require no state lookups and MUST be performed before any state acc
 | `KEYCHAIN_AUTHORIZE` | `key_id`: 20 bytes; `public_key`: 64 or 65 bytes; valid `signature_type`; `admin` keys MUST have `expires_at == 0`; `valid_after`/`valid_before` non-zero, ordered, window ≤ `MAX_VALIDITY_WINDOW`; `authorization_signature`: 1 byte–16,384 bytes and MUST parse as a unified-envelope signature; `witness` ≤ 1,024 bytes |
 | `KEYCHAIN_REVOKE` | `key_id`: 20 bytes; `valid_after`/`valid_before` non-zero, ordered, window ≤ `MAX_VALIDITY_WINDOW`; `revocation_signature`: 1 byte–16,384 bytes and MUST parse as a unified-envelope signature; `witness` ≤ 1,024 bytes |
 | `REACTION_ADD/REMOVE` | `type ≠ NONE`; `target_project_id`: 32 bytes; `target_commit_hash`: 32 bytes |
-| `STORAGE_CLAIM` | `owner_address`: 20 bytes; `actor`: 20 bytes; `units > 0`; `settlement_tx_hash`: 32 bytes; `settlement_chain_id = host_chain_id(network)`; `settlement_block_timestamp > 0` |
+| `STORAGE_CLAIM` | `owner_address`: 20 bytes; `settlement_chain_id = host_chain_id(network)`; non-empty `finalization_cert`, `header_rlp`, `receipt_rlp`, and `proof_nodes`; `settlement_tx_hash`: 32 bytes (display-only). Economic values (`actor`, `units`, timestamp) are derived from the verified proof, not validated structurally. |
 | `USERNAME_CREATE` | `username` MUST already be canonical lowercase ASCII and match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
 | `USERNAME_UPDATE` | `username` MUST already be canonical lowercase ASCII and match `^[a-z0-9][a-z0-9-]{1,30}[a-z0-9]$` |
 | `MERGE_REQUEST_ADD` | `project_id`: 32 bytes; `source_project_id`: 32 bytes and not equal to `project_id`; `source_ref`: 1-254 bytes, no `0x00`; `source_commit_hash`: 32 bytes; `target_ref`: 1-254 bytes, no `0x00`; `title`: 1-200 bytes when UTF-8 encoded |
@@ -1114,7 +1122,7 @@ These checks require state lookups:
 - **`SIGNER_ADD/REMOVE/KEYCHAIN_AUTHORIZE/KEYCHAIN_REVOKE`:** See Section 5.5. The custody preamble (validity window bound to consensus block time, and `nonce == custody_nonce`) MUST pass, and `verify_keychain_admin` MUST accept the operation digest. `SIGNER_ADD` MUST also satisfy the app-attribution checks in Section 5.6. `KEYCHAIN_AUTHORIZE` MUST reject `key_id == owner_address`, MUST verify `key_id` is derived from `public_key`, and MUST reject an already-active or previously-revoked `key_id`. `KEYCHAIN_REVOKE` MUST reject `key_id == owner_address` and MUST reject an already-revoked key. No external-evidence or block-hash check applies to any of these operations.
 - **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
-- **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. Validators MUST verify that the submitter-signed `settlement_block_timestamp` equals the canonical Tempo block's timestamp, and the committed `expires_at` MUST equal `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` so non-validators reproduce the same state root from the signed body without querying Tempo. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op. Otherwise claimant expired storage grants MUST be swept at `MessageData.timestamp`, the raw storage grant MUST be added, and cached `AccountState.storage_units` MUST be refreshed. `STORAGE_CLAIM` does not assign or update usernames.
+- **`STORAGE_CLAIM`:** Every node verifies the message's self-contained in-band Tempo evidence (BLS finalization certificate + RLP header + receipts-trie inclusion proof) against the chainspec-pinned Tempo identity, with no Tempo RPC. `actor`, `owner`, `units`, and the settlement-block timestamp are derived from the proven `Rent` log + header; `expires_at = settlement_block_timestamp + STORAGE_TOTAL_PERIOD`, reproduced identically by every node from the embedded proof. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op. Otherwise claimant expired storage grants MUST be swept at `MessageData.timestamp`, the raw storage grant MUST be added, and cached `AccountState.storage_units` MUST be refreshed. `STORAGE_CLAIM` does not assign or update usernames.
 - **`USERNAME_CREATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must not already have an active username. The requested username must be available after mandatory stale-reservation reclamation. On success, execution MUST set `AccountState.username_last_set_at = MessageData.timestamp`.
 - **`USERNAME_UPDATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must already have an active username. The current username index entry MUST authenticate `[0x08 | current_username] -> owner_address`, otherwise execution MUST fail closed. The requested username must differ from the current username and must be available after mandatory stale-reservation reclamation. The message timestamp MUST be at least `AccountState.username_last_set_at + USERNAME_CHANGE_COOLDOWN`, using saturating `uint32` arithmetic for the comparison. On success, execution MUST set `AccountState.username_last_set_at = MessageData.timestamp`.
 - **`MERGE_REQUEST_ADD`:** Target project exists and is `Active`; source project exists and is not `Removed`; `source_project_id != project_id`; the source project's retained `0x1A` fork-parent chain reaches the target within `MAX_FORK_LINEAGE_DEPTH = 256`; private-target and private-source access checks pass; `source_ref` exists in the source project and resolves exactly to `source_commit_hash`; the referenced source commit exists; after expired-grant sweeping and pending-add reservation, the requester remains within the global active-entry merge-request limit, the requester remains within the requester-per-target active-entry cap of `usable_storage_units × 10` derived from the target owner's usable storage units, and the target project remains within its merge-request namespace ceiling.
@@ -1256,10 +1264,10 @@ V2 does not inject relay-derived system messages into Makechain blocks.
 
 Tempo integration is message-local only:
 
-1. `STORAGE_CLAIM` verification fetches finalized settlement evidence for a specific claim. The submitter signs the settlement block's timestamp in `StorageClaimBody.settlement_block_timestamp`; validators MUST verify it against the canonical Tempo block at verify-time, and non-validators (followers/readers/exporters) read it from the signed body for deterministic replay without any Tempo RPC.
+1. `STORAGE_CLAIM` carries self-contained Tempo evidence (BLS finalization certificate + RLP header + receipts-trie inclusion proof). Every node — validator and non-validator alike — verifies it in-band against the chainspec-pinned Tempo identity, with no Tempo RPC, and derives the settlement-block timestamp from the proven header.
 2. (Reserved.) V2 has no ERC-1271 verification path; custody and verification signatures are verified locally from self-describing signature bytes, with no historical `eth_call`.
 
-No block-global checkpoint or Tempo frontier is committed, replayed, or published into consensus state. The per-message `settlement_block_timestamp` is narrower than a frontier: it authenticates only the single claim it travels with, validator-verified against Tempo and committed into `expires_at`.
+No block-global checkpoint or Tempo frontier is committed, replayed, or published into consensus state. The evidence authenticates only the single claim it travels with; the proven settlement-block timestamp is committed into that claim's `expires_at`.
 
 ### 9.2 Disabled Legacy Event Types
 
@@ -1282,11 +1290,11 @@ Persisted-block replay verification is tri-state:
 
 - `Valid` — structural validation, finalization binding, and any required external-evidence checks succeeded
 - `Invalid` — the stored history is contradictory or malformed and must fail closed
-- `NotYetVerifiable` — the block is structurally sound, but required finalized external evidence is not currently available locally or via configured RPC access
+- `NotYetVerifiable` — retained as an enum variant for post-snapshot replay states, but STORAGE_CLAIM no longer produces it: in-band verification is a pure, total function (verify succeeds or the message is `Invalid`), so there is no "evidence not yet available" posture
 
-Replay verification is message-local in V2. It applies only to message families that require external evidence, such as `STORAGE_CLAIM` settlement verification. Custody, signer-management, and verification-claim signatures require no external evidence and are fully verifiable from the message bytes alone.
+Replay verification is message-local in V2 and fully deterministic: every message — `STORAGE_CLAIM` included — is verifiable from the message bytes alone (a `STORAGE_CLAIM` carries its own Tempo proof). No message family requires external I/O to verify.
 
-For `STORAGE_CLAIM`, only validators query Tempo: they verify the submitter-signed `settlement_block_timestamp` against the canonical Tempo block at verify-time. Non-validators (followers, readers, exporters) read that timestamp from the signed body and replay deterministically without any RPC, so `STORAGE_CLAIM` replay can yield `NotYetVerifiable` only on a validator performing live Tempo verification — never on a non-validator.
+For `STORAGE_CLAIM`, no node queries Tempo: the embedded BLS certificate + receipts-trie proof are verified in-band identically on every role, so replay is deterministic everywhere and never blocks on external evidence.
 
 Disabled relay-era message families remain invalid during replay and fail closed immediately.
 

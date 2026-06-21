@@ -258,12 +258,14 @@ enum KeyScope {
 }
 
 message StorageClaimBody {
-  uint32 units = 1;                 // Units granted by this settlement claim
-  bytes settlement_tx_hash = 2;     // 32-byte settlement transaction hash
-  uint64 settlement_chain_id = 3;   // Host-chain EIP-155 chain id
-  uint32 settlement_log_index = 4;  // Receipt-local log index
-  bytes actor = 5;                  // 20-byte EVM address that paid or credited the settlement
-  uint32 settlement_block_timestamp = 6;  // Tempo settlement-block timestamp; submitter-supplied, validator-verified against Tempo, read by followers for deterministic replay
+  uint64 settlement_chain_id = 1;   // Host-chain EIP-155 chain id (namespacing + claim_id)
+  uint32 tx_index = 2;              // Transaction index in the Tempo block (receipts-trie key)
+  uint32 settlement_log_index = 3;  // Receipt-local log index of the Rent event
+  bytes finalization_cert = 4;      // Tempo BLS finalization certificate (commonware Finalization)
+  bytes header_rlp = 5;             // RLP-encoded Tempo block header (tempo_primitives::TempoHeader)
+  bytes receipt_rlp = 6;            // EIP-2718 receipt trie value at tx_index
+  repeated bytes proof_nodes = 7;   // Ordered receipts-trie Merkle-Patricia inclusion proof
+  bytes settlement_tx_hash = 8;     // 32-byte settlement tx hash; DISPLAY-ONLY, not part of claim_id
 }
 
 message UsernameCreateBody {
