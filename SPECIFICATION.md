@@ -1288,7 +1288,7 @@ claim_id = H("makechain:storage-claim:v1" || LE(settlement_chain_id, 8) ||
 
 Persisted-block replay verification is tri-state:
 
-- `Valid` — structural validation, finalization binding, and any required external-evidence checks succeeded
+- `Valid` — structural validation and finalization binding succeeded (a STORAGE_CLAIM's in-band proof is verified here too — a pure, deterministic check with no external I/O)
 - `Invalid` — the stored history is contradictory or malformed and must fail closed
 - `NotYetVerifiable` — retained as an enum variant for post-snapshot replay states, but STORAGE_CLAIM no longer produces it: in-band verification is a pure, total function (verify succeeds or the message is `Invalid`), so there is no "evidence not yet available" posture
 
@@ -1305,15 +1305,13 @@ Replay-verification blocking is surfaced additively through `GetHealth` and `Get
 - `status`
 - `detail`
 - `blocked_block_number`
-- `waiting_on_external_evidence`
 
-`ReplayVerificationInfo.status` has three protocol-visible values:
+`ReplayVerificationInfo.status` has two protocol-visible values:
 
 - `VERIFIED` — replay verification is complete for the local durable state. This covers both a freshly verified node and a node that completed replay after trusted snapshot import.
 - `TRUSTED_SNAPSHOT` — the node restored state from trusted snapshot provenance and still requires replay-backed verification before replay-sensitive trust is fully restored.
-- `BLOCKED_WAITING_EXTERNAL_EVIDENCE` — replay verification is currently blocked because required finalized external evidence is not available through configured replay-verification RPC access.
 
-Existing `GetHealth.ready` / `/readyz` semantics are preserved: `ready` still means the node has loaded local state and can serve ordinary queries. A node may therefore be `ready = true` while replay verification is `TRUSTED_SNAPSHOT` or `BLOCKED_WAITING_EXTERNAL_EVIDENCE`.
+Existing `GetHealth.ready` / `/readyz` semantics are preserved: `ready` still means the node has loaded local state and can serve ordinary queries. A node may therefore be `ready = true` while replay verification is `TRUSTED_SNAPSHOT`.
 
 Replay-sensitive surfaces MUST still fail closed until replay verification is `VERIFIED`. This includes verified sync-target acquisition, verified snapshot or archive export, and snapshot-fence-backed `GetSnapshotInfo` responses.
 
