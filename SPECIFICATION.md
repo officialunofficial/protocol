@@ -1080,7 +1080,7 @@ These checks require no state lookups and MUST be performed before any state acc
 | `ACCOUNT_DATA` | `field ≠ NONE`; `value` ≤ 500 chars; `DISPLAY_NAME` ≤ 32 bytes |
 | `REF_UPDATE` | `project_id`: 32 bytes; `ref_name`: 1-254 bytes, no `0x00`; `new_hash`: 32 bytes; `old_hash`: 32 bytes when set; `ref_type`: valid enum; `nonce ≥ 1` |
 | `REF_DELETE` | `project_id`: 32 bytes; `ref_name`: 1-254 bytes, no `0x00`; `expected_hash`: 32 bytes when set; `nonce ≥ 1` |
-| `COMMIT_BUNDLE` | `project_id`: 32 bytes; 1-1000 commits; `content_digest`: 32 bytes when set; `url` ≤ 2048 chars, no control chars; each commit: `hash` 32 bytes, `tree_root` 32 bytes, `message_hash` 32 bytes, each parent hash 32 bytes, `author_address` 20 bytes; `title` ≤ 200 chars |
+| `COMMIT_BUNDLE` | `project_id`: 32 bytes; 1-1000 commits; `content_digest`: 32 bytes when set; `url` ≤ 2048 chars, no control chars; each commit: `hash` 32 bytes, `tree_root` 32 bytes, `message_hash` 32 bytes, ≤ 64 parents (each parent hash 32 bytes), `author_address` 20 bytes; `title` ≤ 200 chars |
 | `FORK` | `source_project_id`: 32 bytes; `source_commit_hash`: 32 bytes; `name`: 1-100 chars; `visibility`: valid enum |
 | `COLLABORATOR_ADD` | `project_id`: 32 bytes; `target_owner_address`: 20 bytes; `permission`: valid enum |
 | `COLLABORATOR_REMOVE` | `project_id`: 32 bytes; `target_owner_address`: 20 bytes |
@@ -1506,6 +1506,7 @@ Replay and sync operate entirely within the post-reset history and canonical rul
 | `MAX_REF_NAME_LEN` | 254 bytes | Maximum ref name length |
 | `MAX_PROJECT_NAME_LEN` | 100 chars | Maximum project name length |
 | `MAX_COMMITS_PER_BUNDLE` | 1,000 | Maximum commits in a single bundle |
+| `MAX_PARENT_COMMITS` | 64 | Maximum parent hashes per commit |
 | `MAX_COMMITS_PER_PROJECT` | 10,000 | Commit metadata limit before pruning |
 | `MAX_REFS_PER_PROJECT` | 200 | Maximum refs per project |
 | `MAX_KEYS_PER_ACCOUNT` | 1,000 | Maximum keys per account |
