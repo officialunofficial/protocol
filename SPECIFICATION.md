@@ -32,7 +32,6 @@ A specialized protocol built for making things.
 - [Appendix C: Onchain Contract Summary](#appendix-c-onchain-contract-summary-non-normative)
 - [Appendix D: Correctness Invariants](#appendix-d-correctness-invariants)
 - [Appendix E: Genesis State](#appendix-e-genesis-state)
-- [Appendix F: Changelog](#appendix-f-changelog)
 - [References](#references)
 
 ---
@@ -117,7 +116,7 @@ Message {
 }
 ```
 
-**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](../proto/makechain.proto). For `2026.5.2`, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
+**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](../proto/makechain.proto). As of `2026.6.1`, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
 
 The `data_bytes` field (field 5 on [`Message`](../proto/makechain.proto)) caches `canonical_encode(data)` — the same bytes that were hashed. Verifiers re-encode `data` independently and reject the message if `data_bytes` does not match, then check the hash against the re-encoded bytes. `data_bytes` is never used as a hash input directly; it exists so intermediaries can forward the original encoding without re-serializing.
 
@@ -149,7 +148,7 @@ MessageData {
 
 A valid `MessageData` MUST select exactly one body variant, that body MUST match `type`, and `MESSAGE_TYPE_NONE` is invalid for admitted, replayed, or committed messages.
 
-For MIP 4 deployments, the canonical protobuf additions are:
+The canonical protobuf includes the following body variants and type discriminants for storage claims and usernames:
 
 ```proto
 message MessageData {
@@ -230,10 +229,10 @@ Every message type follows one of two paradigms:
 | `LINK_REMOVE` | 20 | 2P Set | SIGNING | [`LinkRemoveBody`](../proto/makechain.proto) |
 | `REACTION_ADD` | 21 | 2P Set | SIGNING | [`ReactionAddBody`](../proto/makechain.proto) |
 | `REACTION_REMOVE` | 22 | 2P Set | SIGNING | [`ReactionRemoveBody`](../proto/makechain.proto) |
-| `KEYCHAIN_AUTHORIZE` | 25 | Custody-auth | (keychain admin sig) | [`KeychainAuthorizeBody`](../proto/makechain.proto) |
-| `KEYCHAIN_REVOKE` | 26 | Custody-auth | (keychain admin sig) | [`KeychainRevokeBody`](../proto/makechain.proto) |
 | `MERGE_REQUEST_ADD` | 23 | 2P Set | SIGNING | [`MergeRequestAddBody`](../proto/makechain.proto) |
 | `MERGE_REQUEST_REMOVE` | 24 | 2P Set | SIGNING | [`MergeRequestRemoveBody`](../proto/makechain.proto) |
+| `KEYCHAIN_AUTHORIZE` | 25 | Custody-auth | (keychain admin sig) | [`KeychainAuthorizeBody`](../proto/makechain.proto) |
+| `KEYCHAIN_REVOKE` | 26 | Custody-auth | (keychain admin sig) | [`KeychainRevokeBody`](../proto/makechain.proto) |
 
 † `PROJECT_CREATE` is paired with `PROJECT_REMOVE` as a 2P Set, but does not follow the generic `apply_2p_add` re-add path because `project_id` is content-addressed (Section 2.5). See Section 4.2 for the specific semantics.
 
@@ -259,7 +258,7 @@ graph LR
     style W fill:#4a3b6b,color:#fff
 ```
 
-`owner_address` is the sole canonical account identifier in V2. MID does not exist in post-reset semantics.
+`owner_address` is the sole canonical account identifier. MID does not exist.
 
 Any valid 20-byte address is a valid Makechain principal even if it has no persisted account row, no delegated keys, and no active storage grants. Missing account state implies default-zero bookkeeping, not invalid identity.
 
@@ -283,7 +282,7 @@ An account is identified by `owner_address` (`bytes(20)`). Each account's state 
 | `username` | `string \| null` | Canonical lowercase username when the account has completed username registration and still has active storage. |
 | `username_last_set_at` | `uint32` | Consensus timestamp of the most recent successful `USERNAME_CREATE` or `USERNAME_UPDATE`. |
 
-There is no onchain account allocation, transfer, or recovery flow in V2.
+There is no onchain account allocation, transfer, or recovery flow.
 
 ### 3.3 Key Scopes
 
@@ -299,7 +298,7 @@ Privilege ordering: `OWNER < SIGNING < AGENT` (numerically). A key with scope `s
 
 ### 3.4 Key Registration and Storage Funding Paths
 
-V2 has no relay-injected identity or signer-management messages.
+There are no relay-injected identity or signer-management messages.
 
 The only live delegated-key (envelope, family `0x00`) management flow is custody-authorized `SIGNER_ADD` / `SIGNER_REMOVE`. The AccountKeychain custody-key family (family `0x01`) is mutated by `KEYCHAIN_AUTHORIZE` / `KEYCHAIN_REVOKE`. All four are authorized by `verify_keychain_admin` against `owner_address` (Section 5.5): the root `owner_address` is the implicit admin forever, and any active admin custody key may also authorize, via a keychain wrapper.
 
@@ -401,7 +400,7 @@ apply_block(σ, B, R) → σ':
 
 Dropped messages are excluded from the committed block but do not halt execution.
 
-> **Note:** Projects are usually independent state domains, but `MERGE_REQUEST_ADD` now includes requester-global Layer 1 quota checks that can couple adds by the same requester across different target projects. Future implementations MAY execute project groups in parallel only if they preserve equivalence to the canonical serial execution order, including these requester-global dependencies.
+> **Note:** Projects are usually independent state domains, but `MERGE_REQUEST_ADD` includes requester-global Layer 1 quota checks that can couple adds by the same requester across different target projects (see the INV-3 exception in Appendix D). Future implementations MAY execute project groups in parallel only if they preserve equivalence to the canonical serial execution order, including these requester-global dependencies.
 
 #### Message Dispatch
 
@@ -461,7 +460,7 @@ timestamp_valid(M, block_timestamp) → bool:
 
 All arithmetic MUST use saturating subtraction (clamping to 0 on underflow) since timestamps are unsigned integers.
 
-Storage-sensitive types (types that create or remove quota-affecting state): `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `USERNAME_CREATE`, `USERNAME_UPDATE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `STORAGE_CLAIM`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`.
+Storage-sensitive types (types that create or remove quota-affecting state): `PROJECT_CREATE`, `PROJECT_REMOVE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `USERNAME_CREATE`, `USERNAME_UPDATE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `STORAGE_CLAIM`, `MERGE_REQUEST_ADD`, `MERGE_REQUEST_REMOVE`.
 
 ### 4.4 Conflict Resolution
 
@@ -599,9 +598,8 @@ check_key_scope(σ, owner_address, signer, required_scope) → Ok | Err:
 ### 5.2 Project Access Control
 
 ```
-check_project_access(σ, owner_address, project_id, required_permission) → Ok | Err:
-  let project = σ[project_key(project_id)]
-  require project ≠ ⊥ and project.status = Active
+check_project_access(σ, owner_address, project, project_id, required_permission) → Ok | Err:
+  require project ≠ ⊥
 
   if project.owner_address = owner_address:
     return Ok  // owner has full access
@@ -610,6 +608,8 @@ check_project_access(σ, owner_address, project_id, required_permission) → Ok 
   require collab ≠ ⊥ and collab.permission ≥ required_permission
   return Ok
 ```
+
+`check_project_access` takes the already-resolved `project` record rather than looking it up and gating on `status` itself; which statuses are acceptable is the caller's decision (e.g. `get_project_active` for `Active`-only contexts, `get_project_not_removed` where `Archived` is also valid), so the same permission check applies uniformly across those contexts.
 
 ### 5.3 Agent Project Scope
 
@@ -622,16 +622,16 @@ check_agent_project_scope(σ, owner_address, signer, project_id) → Ok | Err:
   return Ok
 ```
 
-### 5.4 V2 Bypass Rules
+### 5.4 Authorization Bypass Rules
 
-V2 has no generic unsigned system-message path.
+There is no generic unsigned system-message path.
 
-All committed V2 block messages are user-submitted envelope-bearing messages. The only bypass rules are:
+All committed block messages are user-submitted envelope-bearing messages. The only bypass rules are:
 
 - `SIGNER_ADD`, `SIGNER_REMOVE`, `KEYCHAIN_AUTHORIZE`, and `KEYCHAIN_REVOKE` bypass delegated-key lookup; authority derives exclusively from AccountKeychain custody signatures accepted by `verify_keychain_admin` against `owner_address` (Section 5.5).
 - `STORAGE_CLAIM` bypasses delegated-key lookup; authority derives exclusively from finalized settlement verification plus claim-marker idempotence.
 
-Pre-V2 relay-era families (`KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, `RELAY_SIGNER_REMOVE`) are not defined in the V2 protobuf. Any message bearing one of these legacy type values MUST fail structural validation as an invalid `MessageType`.
+The identifiers `KEY_ADD`, `OWNERSHIP_TRANSFER`, `STORAGE_RENT`, `RELAY_SIGNER_ADD`, and `RELAY_SIGNER_REMOVE` are not defined in the protobuf. Any message bearing one of these type values MUST fail structural validation as an invalid `MessageType`.
 
 ### 5.4A `STORAGE_CLAIM` Authorization
 
@@ -865,11 +865,11 @@ authorize_merge_request_add(σ, data, body, signer) -> Ok | Err:
 
   let target = get_project_active(σ, body.project_id)
   if target.visibility == PRIVATE:
-    check_project_access(σ, data.owner_address, body.project_id, READ)
+    check_project_access(σ, data.owner_address, target, body.project_id, READ)
 
   let source = get_project_not_removed(σ, body.source_project_id)
   if source.visibility == PRIVATE and source.owner_address != data.owner_address:
-    check_project_access(σ, data.owner_address, body.source_project_id, READ)
+    check_project_access(σ, data.owner_address, source, body.source_project_id, READ)
 
   require body.source_project_id != body.project_id
   require fork_lineage(body.source_project_id) reaches body.project_id within MAX_FORK_LINEAGE_DEPTH using retained 0x1A lineage rows
@@ -981,7 +981,7 @@ already-`Revoked` key id). `KEYCHAIN_REVOKE` flips an `Active` row to `Revoked`,
 sets `revoked_at`, and retains the row as a permanent tombstone; re-authorizing
 a revoked `key_id` fails closed. `admin` custody keys MUST have `expires_at == 0`.
 
-**Merkleized prefixes:** exactly `0x03` through `0x17` inclusive, plus `0x1A`, `0x1B`, and `0x1C`. Prefix `0x02` (blocks) is persisted but non-merkleized. Prefixes `0x18` and `0x19` are non-merkleized operational state used for replay deduplication and crash recovery. Legacy `0x01` message-state storage is not part of the canonical V2 state schema or state root.
+**Merkleized prefixes:** exactly `0x03` through `0x17` inclusive, plus `0x1A`, `0x1B`, and `0x1C`. Prefix `0x02` (blocks) is persisted but non-merkleized. Prefixes `0x18` and `0x19` are non-merkleized operational state used for replay deduplication and crash recovery. `0x01` message-state storage is not part of the state schema or state root.
 
 **Index keys** (not direct protocol state, but merkleized): `0x07` (key reverse), `0x08` (username), `0x0C` (project name), `0x11` (link reverse), `0x13` (reaction reverse), `0x1C` (merge request reverse).
 
@@ -1001,7 +1001,7 @@ This leaves 287 usable bytes. The maximum `ref_name` length is 254 bytes (prefix
 
 The state store supports operation (inclusion) and exclusion proofs anchored to committed state roots, plus light-client message-inclusion proofs.
 
-Proof generation is a single polymorphic RPC, [`GetStateProof`](../proto/makechain.proto): it takes a set of keys and returns, per key, an operation proof (key present, with value) or an exclusion proof (key absent) — all against one shared committed root. Compound and storage-quota assertions are **composed by the caller** by requesting the relevant keys together in a single `GetStateProof` call so they share that root; they are no longer separate RPCs. Verification RPCs [`VerifyOperationProof`](../proto/makechain.proto) / [`VerifyExclusionProof`](../proto/makechain.proto) check against the current committed root, and [`VerifyOperationProofAtBlock`](../proto/makechain.proto) / [`VerifyExclusionProofAtBlock`](../proto/makechain.proto) against the retained finalized root of an explicit `block_number`. Light clients prove message inclusion against `BlockHeader.transactions_root` via [`GetMessageInclusionProof`](../proto/makechain.proto).
+Proof generation is a single polymorphic RPC, [`GetStateProof`](../proto/makechain.proto): it takes a set of keys and returns, per key, an operation proof (key present, with value) or an exclusion proof (key absent) — all against one shared committed root. Compound and storage-quota assertions are **composed by the caller** by requesting the relevant keys together in a single `GetStateProof` call so they share that root. Verification RPCs [`VerifyOperationProof`](../proto/makechain.proto) / [`VerifyExclusionProof`](../proto/makechain.proto) check against the current committed root, and [`VerifyOperationProofAtBlock`](../proto/makechain.proto) / [`VerifyExclusionProofAtBlock`](../proto/makechain.proto) against the retained finalized root of an explicit `block_number`. Light clients prove message inclusion against `BlockHeader.transactions_root` via [`GetMessageInclusionProof`](../proto/makechain.proto).
 
 - **Operation proof** — proves a key-value pair exists at a given root (Merkle inclusion path).
 - **Exclusion proof** — proves a key does NOT exist at a given root (neighboring key boundary).
@@ -1013,7 +1013,7 @@ Proof generation is a single polymorphic RPC, [`GetStateProof`](../proto/makecha
 
 Active membership in 2P sets is established by proving the active key, tombstone key, and prune-marker key together against the same root — requested in one `GetStateProof` call. The entry is active iff the active key exists and `added_at > max(tombstone_at, prune_marker_at)`, with missing removal timestamps treated as absent.
 
-The statement above describes the protocol-level proof model. The public proof allowlists are intentionally narrower than the full state namespace and must match the current V2 proof contract.
+The statement above describes the protocol-level proof model. The public proof allowlists are intentionally narrower than the full state namespace and must match the current proof contract.
 
 The public operation/exclusion proof allowlist is limited to:
 
@@ -1120,7 +1120,7 @@ These checks require state lookups:
 - **`MERGE_REQUEST_ADD`:** Target project exists and is `Active`; source project exists and is not `Removed`; `source_project_id != project_id`; the source project's retained `0x1A` fork-parent chain reaches the target within `MAX_FORK_LINEAGE_DEPTH = 256`; private-target and private-source access checks pass; `source_ref` exists in the source project and resolves exactly to `source_commit_hash`; the referenced source commit exists; after expired-grant sweeping and pending-add reservation, the requester remains within the global active-entry merge-request limit, the requester remains within the requester-per-target active-entry cap of `usable_storage_units × 10` derived from the target owner's usable storage units, and the target project remains within its merge-request namespace ceiling.
 - **`MERGE_REQUEST_REMOVE`:** An active merge request exists at `(project_id, request_id)`; if the remover is the original requester, closure remains valid even if the target project has become `Removed`, provided the active merge-request row still exists; otherwise the target project exists and is not `Removed`; either requester withdrawal or target-project `WRITE+` maintainer closure authorization succeeds; source project status is not checked.
 
-For MIP 4 deployments, quota-bearing add and remove mutations are both gated on usable storage. Accordingly, an account without an active username cannot execute `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `MERGE_REQUEST_ADD`, or `MERGE_REQUEST_REMOVE` through username-gated quota paths.
+Quota-bearing add and remove mutations are both gated on usable storage. Accordingly, an account without an active username cannot execute `PROJECT_CREATE`, `FORK`, `COLLABORATOR_ADD`, `COLLABORATOR_REMOVE`, `VERIFICATION_ADD`, `VERIFICATION_REMOVE`, `LINK_ADD`, `LINK_REMOVE`, `REACTION_ADD`, `REACTION_REMOVE`, `MERGE_REQUEST_ADD`, or `MERGE_REQUEST_REMOVE` through username-gated quota paths.
 
 ---
 
@@ -1220,7 +1220,7 @@ Where:
 - `reconstruct_block(R)` rebuilds the `proto::Block` the proposer assembled and stamps the `ops_root` / `ops_range_*` sync-target fields before hashing.
 - The digest is the canonical block hash from Appendix B.3 (keccak256 over the `commonware-codec`-encoded `BlockHeader`).
 - Hashing the header alone commits to the full block: the header's `transactions_root` (BLAKE3 BMT over the block's message hashes), `state_root`, `dkg_outcome_hash`, and `dealer_log_hash` bind the message set, state, and DKG/dealer-log bytes respectively.
-- Implementations retain a legacy domain-separated BLAKE3 digest of the encoded `ExecutionPayload` — `H(b"makechain:execution-payload:v2" || len(wire) as uint64 LE || wire)` — **only** as a fallback when block reconstruction fails; it is not the signed consensus commitment.
+- Implementations retain a domain-separated BLAKE3 digest of the encoded `ExecutionPayload` — `H(b"makechain:execution-payload:v2" || len(wire) as uint64 LE || wire)` — **only** as a fallback when block reconstruction fails; it is not the signed consensus commitment.
 
 The [`ProjectMessages`](../proto/makechain.proto) entries in `project_messages` MUST be ordered by byte-lexicographic `project_id`, matching the `BTreeMap` iteration order in the reference implementation.
 
@@ -1228,7 +1228,7 @@ Persisted block verification therefore requires both the finalized [`Block`](../
 
 The `proposal_digest(R)` value — the canonical block hash — is what validators sign in finalization certificates. Because it is the block hash, the finalization certificate commits to the block header (and, transitively, the full block content), giving light clients an Ethereum-compatible commitment.
 
-> **Protocol Versioning:** The clean-slate reset network uses a single canonical protocol rule set. Protocol-version dispatch is derived from block **height** via chainspec hardfork activation (`ConsensusConfig::hardfork_at(height)`), not from any proposer-supplied field — `BlockHeader` carries no `version` (and no `chain_id`); both proto fields are reserved. Today `Hardfork::Genesis` is the only variant. `ExecutionPayload.version` remains on the wire and MUST equal `6` for post-reset blocks, but it is a payload-format tag, not the dispatch source. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check; block execution remains authoritative.
+> **Protocol Versioning:** The network uses a single canonical protocol rule set. Protocol-version dispatch is derived from block **height** via chainspec hardfork activation (`ConsensusConfig::hardfork_at(height)`), not from any proposer-supplied field — `BlockHeader` carries no `version` (and no `chain_id`); both proto fields are reserved. Today `Hardfork::Genesis` is the only variant. `ExecutionPayload.version` remains on the wire and MUST equal `6`, but it is a payload-format tag, not the dispatch source. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check; block execution remains authoritative.
 
 ### 8.3 Empty Blocks
 
@@ -1244,7 +1244,7 @@ Pending messages are held in a mempool with:
 - Separation of account vs. project messages for the two-phase execution model.
 - Network validation (reject messages for wrong network).
 - Timestamp validation (reject future messages; reject stale storage-sensitive messages).
-- Structural `MessageType` validation rejects undefined or pre-V2 legacy type values from external submission, P2P gossip, replay, and block execution.
+- Structural `MessageType` validation rejects undefined type values from external submission, P2P gossip, replay, and block execution.
 
 ---
 
@@ -1252,18 +1252,18 @@ Pending messages are held in a mempool with:
 
 ### 9.1 Tempo Integration Model
 
-V2 does not inject relay-derived system messages into Makechain blocks.
+Makechain blocks do not include relay-derived system messages.
 
 Tempo integration is message-local only:
 
 1. `STORAGE_CLAIM` verification fetches finalized settlement evidence for a specific claim. The submitter signs the settlement block's timestamp in `StorageClaimBody.settlement_block_timestamp`; validators MUST verify it against the canonical Tempo block at verify-time, and non-validators (followers/readers/exporters) read it from the signed body for deterministic replay without any Tempo RPC.
-2. (Reserved.) V2 has no ERC-1271 verification path; custody and verification signatures are verified locally from self-describing signature bytes, with no historical `eth_call`.
+2. (Reserved.) There is no ERC-1271 verification path; custody and verification signatures are verified locally from self-describing signature bytes, with no `eth_call`.
 
 No block-global checkpoint or Tempo frontier is committed, replayed, or published into consensus state. The per-message `settlement_block_timestamp` is narrower than a frontier: it authenticates only the single claim it travels with, validator-verified against Tempo and committed into `expires_at`.
 
-### 9.2 Disabled Legacy Event Types
+### 9.2 Relay Integration Scope
 
-There are no relay-derived consensus message families in V2. Legacy relay contracts and events are outside the canonical V2 protocol surface and do not become Makechain block messages.
+There are no relay-derived consensus message families. Relay contracts and events are outside the protocol surface and do not become Makechain block messages.
 
 ### 9.3 Determinism and Replay Protection
 
@@ -1284,7 +1284,7 @@ Persisted-block replay verification is tri-state:
 - `Invalid` — the stored history is contradictory or malformed and must fail closed
 - `NotYetVerifiable` — the block is structurally sound, but required finalized external evidence is not currently available locally or via configured RPC access
 
-Replay verification is message-local in V2. It applies only to message families that require external evidence, such as `STORAGE_CLAIM` settlement verification. Custody, signer-management, and verification-claim signatures require no external evidence and are fully verifiable from the message bytes alone.
+Replay verification is message-local. It applies only to message families that require external evidence, such as `STORAGE_CLAIM` settlement verification. Custody, signer-management, and verification-claim signatures require no external evidence and are fully verifiable from the message bytes alone.
 
 For `STORAGE_CLAIM`, only validators query Tempo: they verify the submitter-signed `settlement_block_timestamp` against the canonical Tempo block at verify-time. Non-validators (followers, readers, exporters) read that timestamp from the signed body and replay deterministically without any RPC, so `STORAGE_CLAIM` replay can yield `NotYetVerifiable` only on a validator performing live Tempo verification — never on a non-validator.
 
@@ -1317,13 +1317,13 @@ VerificationClaim(address owner, address ethAddress, uint256 chainId, uint32 ver
 ```
 Domain: `{ name: "Makechain", version: "1", chainId: host_chain_id(network) }`.
 
-For `ETH_ADDRESS`, both the typed-data field `VerificationClaim.chainId` and the wire field [`VerificationAddBody.chain_id`](../proto/makechain.proto) MUST equal `host_chain_id(MessageData.network)`. On the wire, `VerificationAddBody.chain_id` MUST use the minimal unsigned big-endian byte encoding of that host-chain ID. A verifier MUST reject the claim if either value does not match, or if the key id derived from the signature does not equal the claimed 20-byte address.
+For `ETH_ADDRESS`, both the typed-data field `VerificationClaim.chainId` and the wire field [`VerificationAddBody.chain_id`](../proto/makechain.proto) MUST equal `host_chain_id(MessageData.network)`. On the wire, `VerificationAddBody.chain_id` MUST use the minimal unsigned big-endian byte encoding of that host-chain ID. The typed-data field `VerificationClaim.network` MUST be the exact uppercase string form of `MessageData.network` with no `NETWORK_` prefix — `"MAINNET"`, `"TESTNET"`, or `"DEVNET"` (Appendix A, Host Chain Mapping). A verifier MUST reject the claim if `chainId` or `network` does not match, or if the key id derived from the signature does not equal the claimed 20-byte address.
 
-**SOL_ADDRESS** — Ed25519 signature over `"makechain:verify:<network>:<owner_address_hex>"`. On the wire, the verification address MUST be the raw 32-byte Ed25519 public key and `VerificationAddBody.chain_id` MUST be empty.
+**SOL_ADDRESS** — Ed25519 signature over `"makechain:verify:<network>:<owner_address_hex>"`, where `<network>` is the exact uppercase string form of `MessageData.network` with no `NETWORK_` prefix (`"MAINNET"`, `"TESTNET"`, or `"DEVNET"`) and `<owner_address_hex>` is the 20-byte `owner_address` encoded as lowercase hexadecimal with a `0x` prefix (42 characters total). On the wire, the verification address MUST be the raw 32-byte Ed25519 public key and `VerificationAddBody.chain_id` MUST be empty.
 
 ### 9.7 Public Query Surfaces
 
-Merge-request queries are public, including for projects whose visibility is `PRIVATE`. This follows the V2 read model, where visibility constrains mutation authorization rather than canonical state reads.
+Merge-request queries are public, including for projects whose visibility is `PRIVATE`. This follows the protocol's read model, where visibility constrains mutation authorization rather than canonical state reads.
 
 The public RPC surface includes:
 
@@ -1474,14 +1474,14 @@ Specification versions use [CalVer](https://calver.org/) (`YYYY.M.PATCH`). Each 
 
 **Specification releases** are cut when consensus-critical semantics change (new message types, modified state transitions, key schema changes). Non-consensus changes (clarifications, formatting, appendix additions) do not require a new version.
 
-**Protocol versioning** for the clean-slate reset network is fixed.
+**Protocol versioning** is fixed.
 
 ### 13.1 Protocol Version Dispatch
 
-Protocol version is **derived from block height** via chainspec hardfork activation, never carried in a proposer-supplied block field. The runtime resolves the active rule set with `ConsensusConfig::hardfork_at(height)`, which returns the highest-activation hardfork whose threshold is `≤ height` (implicit `Hardfork::Genesis` floor at height 0). `Hardfork::Genesis` is the only variant today — the clean-slate reset network has shipped no real hardfork; future hardforks add a chainspec activation height, not a wire `version` field.
+Protocol version is **derived from block height** via chainspec hardfork activation, never carried in a proposer-supplied block field. The runtime resolves the active rule set with `ConsensusConfig::hardfork_at(height)`, which returns the highest-activation hardfork whose threshold is `≤ height` (implicit `Hardfork::Genesis` floor at height 0). `Hardfork::Genesis` is the only variant today — no hardfork beyond genesis has been activated; future hardforks add a chainspec activation height, not a wire `version` field.
 
 - `BlockHeader` carries **no** `version` and **no** `chain_id` (both proto fields are reserved). A proposer cannot influence version dispatch.
-- `ExecutionPayload.version` remains on the wire as a payload-format tag and MUST equal `6` for post-reset blocks; it is not the version-dispatch source.
+- `ExecutionPayload.version` remains on the wire as a payload-format tag and MUST equal `6`; it is not the version-dispatch source.
 
 A node MUST dispatch block verification, execution, replay, and sync from `hardfork_at(height)`, and MUST reject an `ExecutionPayload` whose `version` is not `6`.
 
@@ -1491,7 +1491,7 @@ A node MUST dispatch block verification, execution, replay, and sync from `hardf
 - Submit and `DryRunMessage` do not yet know the final block timestamp, so they MUST use current node time as a best-effort precheck for timestamp-sensitive rules.
 - Block execution remains authoritative.
 
-Replay and sync operate entirely within the post-reset history and canonical rule set defined by this specification.
+Replay and sync operate entirely within the canonical history and rule set defined by this specification.
 
 ---
 
@@ -1564,7 +1564,7 @@ The canonical wire format for all protocol messages is [Protocol Buffers v3][pro
 
 ### B.1 Canonical Encoding Rules
 
-The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. For `2026.5.2`, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
+The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. As of `2026.6.1`, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
 
 The reference encoding follows these rules:
 
@@ -1609,7 +1609,7 @@ Field ordering within the [`ProjectMessages`](../proto/makechain.proto) entries 
 
 ## Appendix C: Tempo Integration Summary (Non-Normative)
 
-The clean-slate `Genesis` baseline no longer treats Tempo contracts as block-message producers.
+The `Genesis` baseline does not treat Tempo contracts as block-message producers.
 
 Tempo dependencies are message-local only:
 
@@ -1628,7 +1628,7 @@ For any two validators that apply the same sequence of blocks `B₁, B₂, ..., 
 Given a fixed block sequence, tombstone-backed 2P Set resolution is deterministic — all compliant implementations produce the same state. For an identity that has been previously active or tombstoned, add/remove operations with distinct timestamps additionally produce the same result regardless of execution order. The phantom-tombstone guard (INV-7) means that a remove targeting a never-before-seen identity is a no-op; consequently, bare mathematical CRDT commutativity does not hold for all cases, but consensus total ordering ensures determinism. Equal-timestamp add/add remains proposer-order-dependent.
 
 ### INV-3: Project Isolation
-For any two project-level messages `M₁`, `M₂` targeting different `project_id` values, `apply(apply(σ, M₁), M₂) = apply(apply(σ, M₂), M₁)`. This is the property that enables future parallel execution.
+For any two project-level messages `M₁`, `M₂` targeting different `project_id` values, `apply(apply(σ, M₁), M₂) = apply(apply(σ, M₂), M₁)`. This is the property that enables future parallel execution. **Exception:** two `MERGE_REQUEST_ADD` messages from the same requester targeting different `project_id` values are not commutative with respect to the requester-global Layer 1 quota checks in Section 4.2 — quota state mutated while applying one can change whether the other is admitted, depending on execution order. Parallel execution schemes MUST preserve equivalence to the canonical serial order for these requester-global dependencies.
 
 ### INV-4: Custody Nonce Monotonicity
 For each account, `custody_nonce` is strictly monotonically increasing. Each successful `KEYCHAIN_AUTHORIZE`, `KEYCHAIN_REVOKE`, `SIGNER_ADD`, or `SIGNER_REMOVE` on that account increments the nonce by exactly 1. A `SIGNER_ADD` request signature never increments the request owner's nonce.
@@ -1709,28 +1709,6 @@ The genesis state `σ₀` is the empty key-value store. No pre-registered accoun
 The persisted genesis execution payload has empty `account_messages` and empty `project_messages`.
 
 Validator identity is configured out-of-band via node configuration, not via genesis state.
-
-## Appendix F: Changelog
-
-| Version | Date | Changes |
-|---------|------|---------|
-| 2026.6.1 | 2026-06-05 | **Non-custody spec↔implementation alignment** (documents already-shipped behavior; no semantic change). Block model (§4.2/§8.2/Appendix B/E): `Block = { header, body }` with `BlockBody` + `ConsensusContext`; `ShardChunk`/`ShardWitness`/`chunks` removed; `BlockHeader` drops per-block `version`/`chain_id` and adds `context`/`dkg_outcome_hash`/`dealer_log_hash`/`transactions_root`/`ops_root`/`ops_range_*`; block hash is keccak256(`commonware_codec`(header)) (envelope/content stay BLAKE3); `consensus_finalization` signs that canonical block hash (the header's `transactions_root` binds the message set), not a BLAKE3-of-`ExecutionPayload` digest; `state_root` is the canonical post-execution QMDB root and `ops_root` is a separate QMDB ops-only MMR sync target; `ExecutionPayload` replaces `reshare` with `dealer_log`+`dkg_outcome`. Versioning (§13.1): protocol version is height-dispatched via chainspec `hardfork_at`, not a per-block field. Proofs (§6.3): four `Get*Proof` RPCs consolidated into polymorphic `GetStateProof`; added `GetMessageInclusionProof`. Sync (§10.3): `GetSyncTarget` + p2p QMDB-sync channel (no `SyncFetch`/`SyncBlocks` RPCs); added `GetEpochState`/`GetStateAttestation`/`GetFinalizationCertificate`. Unified `GetActivity` feed. `proto/makechain.proto` synced to the shipped canonical proto except for corrected non-semantic block-hash comments. |
-| 2026.6.0 | 2026-06-04 | **Breaking — AccountKeychain custody model (V2 clean break, chain wipe).** Removed ERC-1271 custody and verification entirely (no `custody_key_type` / `request_key_type` / `claim_key_type` / block-hash fields; corresponding proto fields reserved; removed `MAX_CONTRACT_SIGNATURE_LEN`). Custody and signer-management authorization (`SIGNER_ADD`, `SIGNER_REMOVE`, and new `KEYCHAIN_AUTHORIZE` (25) / `KEYCHAIN_REVOKE` (26)) now use native `Keccak256(commonware_codec(...))` digests with an operation byte and a target key-family byte — not EIP-712. Introduced the custody-key family: the `0x06` keyspace is now `[0x06 \| owner_address:20 \| family:1 \| key_id]` (family `0x00` envelope, `0x01` custody); the root `owner_address` is the implicit admin forever and is never stored as a custody key; custody keys follow a never-seen → active → revoked lifecycle with permanent tombstones. Custody signatures use one self-describing envelope (65=secp256k1, `0x01`=P256, `0x02`=WebAuthn, `0x03 \| account:20 \| primitive`=keychain wrapper); nested wrappers and high-S rejected; WebAuthn origin/RP-ID not enforced. `ETH_ADDRESS` verification claims keep the EIP-712 `VerificationClaim` hash but verify a direct unified-envelope signature locally (no ERC-1271); `MAX_CLAIM_SIGNATURE_LEN` is 16,384 bytes. `custody_nonce` is the shared replay guard across all four custody operations, burned only on the mutated account. |
-| 2026.5.3 | 2026-04-23 | Bump the clean-slate transport version to `6` and commit optional DKG/reshare payloads in `ExecutionPayload.reshare`, making reshare data part of the finalized proposal digest and persisted block-payload pair. |
-| 2026.5.2 | 2026-04-16 | Tighten MIP 5 merge-request quota semantics with a requester-per-target active-entry cap derived from the target owner's usable storage units, keeping the requester-global active-entry limit and target-project namespace ceiling. |
-| 2026.5.1 | 2026-04-16 | Amend MIP 5 merge-request quota semantics to use a requester-global active-entry limit plus a target-project namespace ceiling, and allow requester withdrawal of active merge requests from removed target projects while the active row still exists. |
-| 2026.5.0 | 2026-04-15 | Canonically integrate MIP 5 merge requests: add `MERGE_REQUEST_ADD` / `MERGE_REQUEST_REMOVE`, retained fork-lineage rows, merge-request quota and proof surfaces, dual close authorization, public merge-request queries, and merge-request correctness invariants. |
-| 2026.4.3 | 2026-04-16 | Split username lifecycle from `STORAGE_CLAIM`: restore settlement-only `STORAGE_CLAIM` funding semantics, add explicit `USERNAME_CREATE` and `USERNAME_UPDATE` control surfaces, make quota depend on username-gated usable storage instead of raw grants, remove free-tier write capacity, and update proofs, validation, and invariants accordingly. |
-| 2026.4.2 | 2026-04-14 | Fold MIP 4 registration-time usernames into the clean-slate reset baseline: add canonical username semantics to `STORAGE_CLAIM`, define the `0x08` username index, extend `AccountState` and account reads with `username`, require sweep-time username release and stale-reservation reclamation, and expose username keys on the public operation/exclusion proof surface without adding new RPCs. |
-| 2026.4.1 | 2026-04-10 | Align the canonical specification with MIP 3 clean-slate semantics: keep `Genesis` as the reset-network baseline hardfork, complete ERC-1271 and address-derivation rules, clarify duplicate `STORAGE_CLAIM` idempotence and claim-id construction, tighten message and network validation, and make state-value encoding fully normative. |
-| 2026.4.0 | 2026-04-05 | Replace canonical relay payload commitment with canonical `ExecutionPayload`, require version `5`, remove `relay_checkpoint` from canonical block and payload encoding, and require persisted `(Block, ExecutionPayload)` verification. |
-| 2026.3.3 | 2026-03-30 | Commit `relay_checkpoint` in `BlockHeader` and `RelayPayload`, define tri-state replay verification and `ReplayVerificationStatus`, document replay-sensitive fail-closed surfaces, and specify the genesis zero-checkpoint sentinel. |
-| 2026.3.2 | 2026-03-30 | Add missing structural validation limits. Clarify project content-addressed identity and 2P semantics. Clarify storage quota proof active-grant definition and key ordering property. |
-| 2026.3.1 | 2026-03-26 | Add versioning policy, diagrams, references section. |
-| 2026.3.0 | 2026-03-01 | Restructure for protocol-level rigor. Add relay payload commitment, follower nodes, storage rent, quota pruning, correctness invariants, canonical encoding appendix. |
-| 2026.2.0 | 2026-02-01 | Initial draft. |
-
----
 
 ## References
 
