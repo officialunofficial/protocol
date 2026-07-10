@@ -486,12 +486,10 @@ message SubblockPayload {
 
 message Height {
   // `shard_index` is not part of the wire format. Height is a single
-  // `u64 block_number`; there is no multi-shard indexing scheme, and the
-  // consensus layer models height as a single u64. Because a proto3-default
-  // zero for an absent field encodes indistinguishably from an explicit
-  // zero, reintroducing `shard_index` with a different meaning would rotate
-  // the encoded `Height` (and any digest that hashes a reconstructed Block,
-  // e.g. proposal_digest).
+  // `u64 block_number`; there is no multi-shard indexing scheme. The retired
+  // field number 1 MUST NOT be reused: adding any field to `Height` changes
+  // the canonical encoding of the block header, and therefore the block hash
+  // and proposal digest that hash it.
   uint64 block_number = 2;
 }
 

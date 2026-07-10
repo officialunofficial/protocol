@@ -116,7 +116,7 @@ Message {
 }
 ```
 
-**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](../proto/makechain.proto). As of `2026.6.1`, this is defined by the canonical encoding rules in Appendix B, not by generic Protocol Buffers serialization alone.
+**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](../proto/makechain.proto). It is defined by the canonical encoding rules in Appendix B and is not Protocol Buffers serialization; it is the distinct canonical encoding those rules define.
 
 The `data_bytes` field (field 5 on [`Message`](../proto/makechain.proto)) caches `canonical_encode(data)` — the same bytes that were hashed. Verifiers re-encode `data` independently and reject the message if `data_bytes` does not match, then check the hash against the re-encoded bytes. `data_bytes` is never used as a hash input directly; it exists so intermediaries can forward the original encoding without re-serializing.
 
@@ -1317,9 +1317,9 @@ VerificationClaim(address owner, address ethAddress, uint256 chainId, uint32 ver
 ```
 Domain: `{ name: "Makechain", version: "1", chainId: host_chain_id(network) }`.
 
-For `ETH_ADDRESS`, both the typed-data field `VerificationClaim.chainId` and the wire field [`VerificationAddBody.chain_id`](../proto/makechain.proto) MUST equal `host_chain_id(MessageData.network)`. On the wire, `VerificationAddBody.chain_id` MUST use the minimal unsigned big-endian byte encoding of that host-chain ID. The typed-data field `VerificationClaim.network` MUST be the exact uppercase string form of `MessageData.network` with no `NETWORK_` prefix — `"MAINNET"`, `"TESTNET"`, or `"DEVNET"` (Appendix A, Host Chain Mapping). A verifier MUST reject the claim if `chainId` or `network` does not match, or if the key id derived from the signature does not equal the claimed 20-byte address.
+For `ETH_ADDRESS`, both the typed-data field `VerificationClaim.chainId` and the wire field [`VerificationAddBody.chain_id`](../proto/makechain.proto) MUST equal `host_chain_id(MessageData.network)`. On the wire, `VerificationAddBody.chain_id` MUST use the minimal unsigned big-endian byte encoding of that host-chain ID. The typed-data field `VerificationClaim.network` MUST be the exact lowercase string form of `MessageData.network` with no `NETWORK_` prefix — `"mainnet"`, `"testnet"`, or `"devnet"` (Appendix A, Host Chain Mapping). A verifier MUST reject the claim if `chainId` or `network` does not match, or if the key id derived from the signature does not equal the claimed 20-byte address.
 
-**SOL_ADDRESS** — Ed25519 signature over `"makechain:verify:<network>:<owner_address_hex>"`, where `<network>` is the exact uppercase string form of `MessageData.network` with no `NETWORK_` prefix (`"MAINNET"`, `"TESTNET"`, or `"DEVNET"`) and `<owner_address_hex>` is the 20-byte `owner_address` encoded as lowercase hexadecimal with a `0x` prefix (42 characters total). On the wire, the verification address MUST be the raw 32-byte Ed25519 public key and `VerificationAddBody.chain_id` MUST be empty.
+**SOL_ADDRESS** — Ed25519 signature over `"makechain:verify:<network>:<owner_address_hex>"`, where `<network>` is the exact lowercase string form of `MessageData.network` with no `NETWORK_` prefix (`"mainnet"`, `"testnet"`, or `"devnet"`) and `<owner_address_hex>` is the 20-byte `owner_address` encoded as lowercase hexadecimal without a `0x` prefix (40 characters total). On the wire, the verification address MUST be the raw 32-byte Ed25519 public key and `VerificationAddBody.chain_id` MUST be empty.
 
 ### 9.7 Public Query Surfaces
 
@@ -1560,21 +1560,26 @@ The zero address remains the fail-closed sentinel. Networks whose `settlement_co
 
 ## Appendix B: Wire Format and Canonical Encoding
 
-The canonical wire format for all protocol messages is [Protocol Buffers v3][protobuf] as defined in [`proto/makechain.proto`](../proto/makechain.proto). This file is the normative reference for field numbers, types, and encoding of core structures such as [`Message`](../proto/makechain.proto), [`ExecutionPayload`](../proto/makechain.proto), and [`Block`](../proto/makechain.proto).
+The transport wire format for protocol messages — the outer envelopes carried on RPC and gossip, such as [`Message`](../proto/makechain.proto), [`ExecutionPayload`](../proto/makechain.proto), and [`Block`](../proto/makechain.proto) — is [Protocol Buffers v3][protobuf] as defined in [`proto/makechain.proto`](../proto/makechain.proto). That file is the normative reference for field numbers and types.
+
+All consensus-critical hash inputs, however, are NOT hashed as Protocol Buffers. The message hash, the cached `data_bytes`, the block hash, and the custody authorization digests are all computed over `canonical_encode`, a distinct deterministic byte encoding defined by the rules in B.1 below. Protocol Buffers is the transport of the envelopes; `canonical_encode` is the encoding of the bytes that are hashed. The two are independent: the field numbers and types come from the `.proto` definitions, but the on-the-wire hash bytes follow B.1, not Protocol Buffers serialization.
 
 ### B.1 Canonical Encoding Rules
 
-The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output following the rules below. Independent implementations MUST match published conformance vectors to confirm byte-exact compatibility.
+The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output following the rules below. It is NOT Protocol Buffers serialization: fields are concatenated without tags or wire-type markers, and a general-purpose Protocol Buffers encoder does not produce these bytes. Independent implementations MUST match published conformance vectors to confirm byte-exact compatibility.
 
-Canonical encoding follows these rules:
+For each message, `canonical_encode` emits the encodings of its fields, one after another, in ascending proto field-number order, with no field tags, no wire-type markers, and no length prefix around the message as a whole. Field values are encoded as follows:
 
-1. Fields MUST be serialized in ascending field-number order.
-2. Proto3 default values (0 for integers, empty for strings/bytes, 0 for enums) MUST be omitted from the wire format.
-3. `oneof` variant presence MUST be encoded even when all sub-fields of the selected variant are default-valued, because the presence of the variant is semantically meaningful.
-4. `map` fields are not used in this protocol.
-5. Unknown fields MUST NOT be present in canonical encodings.
-6. Varint encoding MUST use the minimum number of bytes (no leading zero bytes beyond what the standard encoding requires).
-7. Implementations MUST apply rules 1–6 on top of standard Protocol Buffers serialization. Conformance vectors are the authoritative test suite for byte-exact compatibility.
+1. **Integers** are fixed-width and big-endian: a `u32` is 4 bytes, a `u64` is 8 bytes. Every field is always emitted; there is no default-value omission, so a zero-valued integer still contributes its full width.
+2. **Booleans** are a single byte (`0x00` false, `0x01` true).
+3. **Enums** are a single unsigned byte holding the enum discriminant.
+4. **Fixed-size byte fields** (for example 20-byte addresses, 32-byte hashes and keys) are emitted as their raw bytes with no length prefix.
+5. **Variable-length byte strings and UTF-8 strings** are emitted as a varint length prefix (byte count) followed by the raw bytes; strings are their UTF-8 bytes. Varints MUST use the minimum number of bytes.
+6. **Repeated fields** are emitted as a varint element-count prefix followed by the encoding of each element in order. A list of fixed-size byte items (for example a list of 32-byte hashes) emits the count prefix then each item as raw bytes with no per-item length prefix; a list of variable-length byte items emits the count prefix then each item with its own varint length prefix.
+7. **Optional fields and optional sub-messages** are emitted as a 1-byte presence tag: `0x00` when absent (nothing follows), or `0x01` when present, followed immediately by the encoded value. For certain optional 32-byte hash fields the absent case is defined as an empty byte value (see B.3), which encodes as the `0x00` presence tag.
+8. A **`oneof`** is emitted as a single unsigned byte selecting the active variant, followed by that variant's encoding. The selector `0x00` is reserved for "no variant set" (nothing follows); each non-zero selector value equals the proto field number of the active variant, whose payload is then encoded per these rules. The [`MessageData`](../proto/makechain.proto) body oneof uses this convention (selector `0` for an absent body, otherwise the body variant's field number).
+9. A **required sub-message** that is absent in memory MUST be encoded as if it held its zero value (each of its fields at zero/empty), so that its contribution to the bytes is fixed and unambiguous.
+10. `map` fields are not used in this protocol, and no unknown or extension fields are ever present in a canonical encoding.
 
 ### B.2 State Value Encoding
 
@@ -1593,7 +1598,9 @@ Conformance vectors are the authoritative test suite for byte-exact compatibilit
 
 ### B.3 Block Hash
 
-Block hash: `keccak256(canonical_encode(BlockHeader))` where `canonical_encode` follows the determinism rules defined in B.1 for [`MessageData`](../proto/makechain.proto) encoding; see [`BlockHeader`](../proto/makechain.proto). The block hash uses **keccak256** (not BLAKE3) for Ethereum-tooling / light-client / EIP-1186 compatibility; the `MessageData` envelope hash and content-addressed identifiers (project IDs, commit hashes) remain BLAKE3.
+Block hash: `keccak256(canonical_encode(BlockHeader))` where `canonical_encode` follows the encoding rules defined in B.1; see [`BlockHeader`](../proto/makechain.proto). The block hash uses **keccak256** (not BLAKE3) for Ethereum-tooling / light-client / EIP-1186 compatibility; the `MessageData` envelope hash and content-addressed identifiers (project IDs, commit hashes) remain BLAKE3.
+
+The header's optional 32-byte hash fields (`dkg_outcome_hash`, `dealer_log_hash`, `transactions_root`, `ops_root`) are encoded per the optional-field rule (B.1 rule 7): an empty byte value means absent and encodes as the single `0x00` presence tag, while a present value encodes as `0x01` followed by the 32 raw bytes. The required `height` sub-message, when absent in memory, is encoded as a zero-valued `Height` (B.1 rule 9), so it always contributes its fixed 8-byte `block_number`.
 
 ### B.4 Proposal Digest
 
