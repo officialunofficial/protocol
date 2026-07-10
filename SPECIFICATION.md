@@ -80,7 +80,7 @@ Throughout this document, "MUST", "MUST NOT", "SHOULD", and "MAY" follow [RFC 21
 - The network is asynchronous: messages may be delayed, reordered, or dropped.
 - At most `f` of `3f + 1` validators are Byzantine.
 - Cryptographic primitives (Ed25519, BLAKE3, secp256k1, P-256) are unbroken.
-- The Tempo settlement chain provides finality for message-local external evidence.
+- The settlement chain (used for storage-claim verification) provides finality for message-local external evidence.
 
 **Out of scope:**
 - Denial-of-service at the network transport layer.
@@ -116,7 +116,7 @@ Message {
 }
 ```
 
-**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](../proto/makechain.proto). As of `2026.6.1`, this is defined by the reference Rust implementation described in Appendix B, not by generic Protocol Buffers serialization alone.
+**`canonical_encode(data)`** is the Makechain canonical byte encoding of [`MessageData`](../proto/makechain.proto). As of `2026.6.1`, this is defined by the canonical encoding rules in Appendix B, not by generic Protocol Buffers serialization alone.
 
 The `data_bytes` field (field 5 on [`Message`](../proto/makechain.proto)) caches `canonical_encode(data)` — the same bytes that were hashed. Verifiers re-encode `data` independently and reject the message if `data_bytes` does not match, then check the hash against the re-encoded bytes. `data_bytes` is never used as a hash input directly; it exists so intermediaries can forward the original encoding without re-serializing.
 
@@ -302,7 +302,7 @@ There are no relay-injected identity or signer-management messages.
 
 The only live delegated-key (envelope, family `0x00`) management flow is custody-authorized `SIGNER_ADD` / `SIGNER_REMOVE`. The AccountKeychain custody-key family (family `0x01`) is mutated by `KEYCHAIN_AUTHORIZE` / `KEYCHAIN_REVOKE`. All four are authorized by `verify_keychain_admin` against `owner_address` (Section 5.5): the root `owner_address` is the implicit admin forever, and any active admin custody key may also authorize, via a keychain wrapper.
 
-The only Tempo-backed storage ingress is `STORAGE_CLAIM`, a settlement-verified user-submitted message that funds raw storage grants. Username control is handled separately by delegated-key-authorized `USERNAME_CREATE` and `USERNAME_UPDATE` messages. Duplicate replay remains anchored to settled claim coordinates.
+The only settlement-chain-backed storage ingress is `STORAGE_CLAIM`, a settlement-verified user-submitted message that funds raw storage grants. Username control is handled separately by delegated-key-authorized `USERNAME_CREATE` and `USERNAME_UPDATE` messages. Duplicate replay remains anchored to settled claim coordinates.
 
 ### 3.5 Storage-Backed Usernames
 
@@ -676,7 +676,7 @@ data, no ERC-1271, and no `custody_key_type` / validation-block-hash fields.
 
 #### 5.5.1 Authorization Digests
 
-Each authorization digest is `Keccak256(commonware_codec(payload))`, where the
+Each authorization digest is `Keccak256(canonical_encode(payload))`, where the
 payload begins with a one-byte operation discriminant and — for the family-bound
 operations — a one-byte target key family:
 
@@ -692,31 +692,31 @@ The family byte binds each signed payload to the keyspace family it mutates
 (Section 6.1), so a signature for an envelope operation cannot be replayed
 against the custody family or vice versa.
 
-Each payload is encoded with `commonware-codec` (canonical, byte-stable) in the
+Each payload is encoded with `canonical_encode` (canonical, byte-stable) in the
 field order below, then hashed with Keccak-256. The `KEYCHAIN_AUTHORIZE` and
 `KEYCHAIN_REVOKE` digests additionally commit to a `witness` field — optional
 app-challenge binding bytes that change the digest but are never persisted.
 
 ```
-keychain_authorize_digest = Keccak256(commonware_codec(
+keychain_authorize_digest = Keccak256(canonical_encode(
   0x01 | 0x01 | network:i32 | owner_address:20 | key_id:20 |
   signature_type:u8 | public_key:bytes | admin:bool | expires_at:u64 |
   valid_after:u64 | valid_before:u64 | nonce:u64 | witness:bytes))
 
-keychain_revoke_digest = Keccak256(commonware_codec(
+keychain_revoke_digest = Keccak256(canonical_encode(
   0x02 | 0x01 | network:i32 | owner_address:20 | key_id:20 |
   valid_after:u64 | valid_before:u64 | nonce:u64 | witness:bytes))
 
-signer_add_digest = Keccak256(commonware_codec(
+signer_add_digest = Keccak256(canonical_encode(
   0x03 | 0x00 | network:i32 | owner_address:20 | request_owner_address:20 |
   key:32 | scope:u32 | valid_after:u64 | valid_before:u64 | nonce:u64 |
   allowed_projects:[32]))
 
-signer_remove_digest = Keccak256(commonware_codec(
+signer_remove_digest = Keccak256(canonical_encode(
   0x04 | 0x00 | network:i32 | owner_address:20 | key:32 |
   valid_after:u64 | valid_before:u64 | nonce:u64))
 
-signer_request_digest = Keccak256(commonware_codec(
+signer_request_digest = Keccak256(canonical_encode(
   0x05 | network:i32 | owner_address:20 | request_owner_address:20 |
   key:32 | scope:u32 | valid_after:u64 | valid_before:u64 | nonce:u64 |
   allowed_projects:[32]))
@@ -724,7 +724,7 @@ signer_request_digest = Keccak256(commonware_codec(
 
 `network` is the [`MessageData.network`](../proto/makechain.proto) enum value,
 binding each digest to a single Makechain network and preventing cross-network
-replay. `commonware_codec` length-prefixes variable-length `bytes` and `[32]`
+replay. `canonical_encode` length-prefixes variable-length `bytes` and `[32]`
 lists.
 
 #### 5.5.2 Authorization Predicate (`verify_keychain_admin`)
@@ -776,7 +776,7 @@ for inputs longer than 65 bytes.
 
 **Key-id derivation:**
 - secp256k1: `keccak256(uncompressed_pubkey[1:65])[12:32]` (standard Ethereum address)
-- P256 / WebAuthn P256: `keccak256(pub_x:32 \| pub_y:32)[12:32]` (Tempo P256 address)
+- P256 / WebAuthn P256: `keccak256(pub_x:32 \| pub_y:32)[12:32]` (settlement-chain P256 address)
 
 P256 and WebAuthn therefore share the same 20-byte key-id space for the same
 underlying P256 keypair.
@@ -843,7 +843,7 @@ The `custody_nonce` counter is shared across all four custody operations on a si
 Recovered wallet addresses are signature-family specific:
 
 - secp256k1 uses standard Ethereum address derivation from the recovered uncompressed public key
-- P256 and WebAuthn P256 use Tempo address derivation `keccak256(pub_key_x || pub_key_y)[12:32]`
+- P256 and WebAuthn P256 use settlement-chain address derivation `keccak256(pub_key_x || pub_key_y)[12:32]`
 
 P256 and WebAuthn therefore share the same 20-byte address space for the same underlying P256 keypair.
 
@@ -1051,9 +1051,9 @@ Quota-proof verification is:
 
 ### 6.4 Merkle State
 
-Committed state is stored in a merkleized key-value store (QMDB). Validators execute each block against a copy-on-write overlay, then merkleize the resulting write-set to produce the committed `state_root`. `BlockHeader.state_root` is this canonical post-execution QMDB state root.
+Committed state is stored in a merkleized key-value store — the state store. Validators execute each block against a copy-on-write overlay, then merkleize the resulting write-set to produce the committed `state_root`. `BlockHeader.state_root` is this canonical post-execution state root.
 
-`BlockHeader.ops_root` (with `ops_range_start` / `ops_range_end`) is a **separate** QMDB ops-only MMR root and op-count range that serves as the witness-free, proof-verified **sync target** — the values a syncing node needs to reconstruct a `qmdb::sync::Target` from a block header alone. It is additional to `state_root`, not a replacement, and is zero on blocks built without a merkleized batch (genesis, tests, sync-replayed bodies).
+`BlockHeader.ops_root` (with `ops_range_start` / `ops_range_end`) is a **separate** ops-only Merkle Mountain Range (MMR) root and op-count range that serves as the witness-free, proof-verified **sync target** — the values a syncing node needs to reconstruct a state-sync target from a block header alone. It is additional to `state_root`, not a replacement, and is zero on blocks built without a merkleized batch (genesis, tests, sync-replayed bodies).
 
 The canonical state root authenticates all durable protocol state and secondary indexes. It does **not** commit to a per-message history index.
 
@@ -1114,7 +1114,7 @@ These checks require state lookups:
 - **`SIGNER_ADD/REMOVE/KEYCHAIN_AUTHORIZE/KEYCHAIN_REVOKE`:** See Section 5.5. The custody preamble (validity window bound to consensus block time, and `nonce == custody_nonce`) MUST pass, and `verify_keychain_admin` MUST accept the operation digest. `SIGNER_ADD` MUST also satisfy the app-attribution checks in Section 5.6. `KEYCHAIN_AUTHORIZE` MUST reject `key_id == owner_address`, MUST verify `key_id` is derived from `public_key`, and MUST reject an already-active or previously-revoked `key_id`. `KEYCHAIN_REVOKE` MUST reject `key_id == owner_address` and MUST reject an already-revoked key. No external-evidence or block-hash check applies to any of these operations.
 - **`PROJECT_METADATA`:** Signer has at least WRITE permission on the target project. `NAME` and `VISIBILITY` updates additionally require ADMIN permission.
 - **`REACTION_ADD`:** Target project exists and not removed; target commit exists.
-- **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. Validators MUST verify that the submitter-signed `settlement_block_timestamp` equals the canonical Tempo block's timestamp, and the committed `expires_at` MUST equal `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` so non-validators reproduce the same state root from the signed body without querying Tempo. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op. Otherwise claimant expired storage grants MUST be swept at `MessageData.timestamp`, the raw storage grant MUST be added, and cached `AccountState.storage_units` MUST be refreshed. `STORAGE_CLAIM` does not assign or update usernames.
+- **`STORAGE_CLAIM`:** Finalized settlement evidence must match `owner_address`, `actor`, and `units`; expiry derives from the finalized settlement block timestamp. Validators MUST verify that the submitter-signed `settlement_block_timestamp` equals the canonical settlement-chain block's timestamp, and the committed `expires_at` MUST equal `settlement_block_timestamp + STORAGE_TOTAL_PERIOD` so non-validators reproduce the same state root from the signed body without querying the settlement chain. If the claim marker already exists, the message is a valid duplicate claim and execution is an idempotent no-op. Otherwise claimant expired storage grants MUST be swept at `MessageData.timestamp`, the raw storage grant MUST be added, and cached `AccountState.storage_units` MUST be refreshed. `STORAGE_CLAIM` does not assign or update usernames.
 - **`USERNAME_CREATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must not already have an active username. The requested username must be available after mandatory stale-reservation reclamation. On success, execution MUST set `AccountState.username_last_set_at = MessageData.timestamp`.
 - **`USERNAME_UPDATE`:** Delegated-key authorization with required scope `SIGNING` must pass. Claimant expired storage grants MUST be swept at `MessageData.timestamp`. The claimant must have active storage after sweep and must already have an active username. The current username index entry MUST authenticate `[0x08 | current_username] -> owner_address`, otherwise execution MUST fail closed. The requested username must differ from the current username and must be available after mandatory stale-reservation reclamation. The message timestamp MUST be at least `AccountState.username_last_set_at + USERNAME_CHANGE_COOLDOWN`, using saturating `uint32` arithmetic for the comparison. On success, execution MUST set `AccountState.username_last_set_at = MessageData.timestamp`.
 - **`MERGE_REQUEST_ADD`:** Target project exists and is `Active`; source project exists and is not `Removed`; `source_project_id != project_id`; the source project's retained `0x1A` fork-parent chain reaches the target within `MAX_FORK_LINEAGE_DEPTH = 256`; private-target and private-source access checks pass; `source_ref` exists in the source project and resolves exactly to `source_commit_hash`; the referenced source commit exists; after expired-grant sweeping and pending-add reservation, the requester remains within the global active-entry merge-request limit, the requester remains within the requester-per-target active-entry cap of `usable_storage_units × 10` derived from the target owner's usable storage units, and the target project remains within its merge-request namespace ceiling.
@@ -1128,7 +1128,7 @@ Quota-bearing add and remove mutations are both gated on usable storage. Accordi
 
 ### 8.1 Engine
 
-**Engine:** [Simplex BFT][simplex] via [Commonware][commonware] consensus.
+**Engine:** [Simplex BFT][simplex] consensus.
 **Namespace:** `b"makechain-v0"` — used as the Simplex namespace for finalization certificate signing and verification. Follower nodes MUST use this namespace to verify finalization certificates.
 **Block time:** Deployment target of ~200ms under expected operating conditions.
 **Finality:** Single voting round in the deployed configuration; end-to-end latency is deployment-dependent.
@@ -1146,24 +1146,24 @@ Block {
 }
 
 BlockHeader {
-  height:            { block_number: uint64 }  // single-chain; shard_index reserved
+  height:            { block_number: uint64 }  // single-chain; no shard_index field on the wire
   timestamp:         uint64               // Proposer's wall-clock time (unix seconds)
   parent_hash:       bytes(32)            // parent block hash
   state_root:        bytes(32)            // canonical merkleized state root after executing this block
-  ops_root:          bytes(32)            // QMDB ops-only MMR root
+  ops_root:          bytes(32)            // ops-only Merkle Mountain Range (MMR) root
   ops_range_start:   uint64               // committed op range (sync target)
   ops_range_end:     uint64
   transactions_root: bytes                // BLAKE3 BMT root over message hashes (account first, then user); empty when no messages
   dkg_outcome_hash:  bytes(32)            // header-binds body.dkg_outcome
   dealer_log_hash:   bytes(32)            // header-binds body.dealer_log
   context:           ConsensusContext     // round epoch/view, leader, parent view
-  // version and chain_id are NOT per-block fields (reserved) — see Protocol Versioning below
+  // version and chain_id are not per-block fields — see Protocol Versioning below
 }
 
 BlockBody {
   user_messages:          Message[]   // flat user stream; per-project grouping recovered via project_id
   account_messages:       Message[]   // account-level messages (serial pre-pass)
-  consensus_finalization: bytes       // commonware-codec Finalization<ed25519, BlockDigest>
+  consensus_finalization: bytes       // canonically-encoded finalization certificate over the block digest
   dealer_log:             bytes        // raw SignedDealerLog bytes (late-phase non-boundary blocks); header-bound
   dkg_outcome:            bytes        // canonical OnchainDkgOutcome bytes (boundary blocks); header-bound
 }
@@ -1178,7 +1178,7 @@ ConsensusContext {
 
 The canonical wire format is Protocol Buffers as defined in [`proto/makechain.proto`](../proto/makechain.proto): [`Block`](../proto/makechain.proto), [`BlockHeader`](../proto/makechain.proto), [`BlockBody`](../proto/makechain.proto), [`ConsensusContext`](../proto/makechain.proto), and [`ExecutionPayload`](../proto/makechain.proto).
 
-**Block hash.** The block hash is `keccak256(commonware_codec(header))` — keccak256 (not BLAKE3) so headers are compatible with Ethereum tooling, light clients, and EIP-1186 state proofs. Message-envelope and content hashing remain BLAKE3. The header carries the chain-link fields (height, timestamp, parent_hash, state_root, ops_root, transactions_root, dkg/dealer-log hashes, context), so header verification does not decode the body and light clients can fetch headers alone. The body is content-addressed by the header: `state_root` covers state, `transactions_root` covers the message set, and `dkg_outcome_hash` / `dealer_log_hash` cover the DKG/dealer-log bytes.
+**Block hash.** The block hash is `keccak256(canonical_encode(header))` — keccak256 (not BLAKE3) so headers are compatible with Ethereum tooling, light clients, and EIP-1186 state proofs. Message-envelope and content hashing remain BLAKE3. The header carries the chain-link fields (height, timestamp, parent_hash, state_root, ops_root, transactions_root, dkg/dealer-log hashes, context), so header verification does not decode the body and light clients can fetch headers alone. The body is content-addressed by the header: `state_root` covers state, `transactions_root` covers the message set, and `dkg_outcome_hash` / `dealer_log_hash` cover the DKG/dealer-log bytes.
 
 `body.consensus_finalization` commits to `proposal_digest(R)`, the canonical block hash reconstructed from the associated [`ExecutionPayload`](../proto/makechain.proto), the canonical execution input:
 
@@ -1194,7 +1194,7 @@ ExecutionPayload {
   version:           uint32            // execution-payload version (= 6); see Protocol Versioning
   dealer_log:        bytes             // raw SignedDealerLog bytes (late-phase non-boundary blocks)
   dkg_outcome:       bytes             // canonical OnchainDkgOutcome bytes (boundary blocks)
-  ops_root:          bytes(32)         // QMDB ops-only MMR root, stamped into BlockHeader.ops_root
+  ops_root:          bytes(32)         // ops-only MMR root, stamped into BlockHeader.ops_root
   ops_range_start:   uint64
   ops_range_end:     uint64
 }
@@ -1213,22 +1213,22 @@ block = reconstruct_block(R)   // header + body from R: parent_hash, height, tim
                                // network, state_root, account + per-project messages,
                                // dealer_log, dkg_outcome, consensus context, then the
                                // ops-target fields (ops_root, ops_range_start/end)
-proposal_digest(R) = keccak256(commonware_codec(block.header))   // == compute_block_hash(block) == block.digest()
+proposal_digest(R) = keccak256(canonical_encode(block.header))   // == compute_block_hash(block) == block.digest()
 ```
 
 Where:
 - `reconstruct_block(R)` rebuilds the `proto::Block` the proposer assembled and stamps the `ops_root` / `ops_range_*` sync-target fields before hashing.
-- The digest is the canonical block hash from Appendix B.3 (keccak256 over the `commonware-codec`-encoded `BlockHeader`).
+- The digest is the canonical block hash from Appendix B.3 (keccak256 over the canonically-encoded `BlockHeader`).
 - Hashing the header alone commits to the full block: the header's `transactions_root` (BLAKE3 BMT over the block's message hashes), `state_root`, `dkg_outcome_hash`, and `dealer_log_hash` bind the message set, state, and DKG/dealer-log bytes respectively.
 - Implementations retain a domain-separated BLAKE3 digest of the encoded `ExecutionPayload` — `H(b"makechain:execution-payload:v2" || len(wire) as uint64 LE || wire)` — **only** as a fallback when block reconstruction fails; it is not the signed consensus commitment.
 
-The [`ProjectMessages`](../proto/makechain.proto) entries in `project_messages` MUST be ordered by byte-lexicographic `project_id`, matching the `BTreeMap` iteration order in the reference implementation.
+The [`ProjectMessages`](../proto/makechain.proto) entries in `project_messages` MUST be ordered by byte-lexicographic `project_id`.
 
 Persisted block verification therefore requires both the finalized [`Block`](../proto/makechain.proto) and the exact associated [`ExecutionPayload`](../proto/makechain.proto). A sync provider serving historical blocks MUST also serve that payload, and a syncing node MUST verify that the served `(Block, ExecutionPayload)` pair yields the canonical block hash committed by `consensus_finalization`.
 
 The `proposal_digest(R)` value — the canonical block hash — is what validators sign in finalization certificates. Because it is the block hash, the finalization certificate commits to the block header (and, transitively, the full block content), giving light clients an Ethereum-compatible commitment.
 
-> **Protocol Versioning:** The network uses a single canonical protocol rule set. Protocol-version dispatch is derived from block **height** via chainspec hardfork activation (`ConsensusConfig::hardfork_at(height)`), not from any proposer-supplied field — `BlockHeader` carries no `version` (and no `chain_id`); both proto fields are reserved. Today `Hardfork::Genesis` is the only variant. `ExecutionPayload.version` remains on the wire and MUST equal `6`, but it is a payload-format tag, not the dispatch source. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check; block execution remains authoritative.
+> **Protocol Versioning:** The network uses a single canonical protocol rule set. Protocol-version dispatch is derived from block **height** via chainspec hardfork activation (`hardfork_at(height)`), not from any proposer-supplied field — `BlockHeader` carries no `version` field and no `chain_id` field. Today `Hardfork::Genesis` is the only variant. `ExecutionPayload.version` remains on the wire and MUST equal `6`, but it is a payload-format tag, not the dispatch source. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check; block execution remains authoritative.
 
 ### 8.3 Empty Blocks
 
@@ -1250,16 +1250,16 @@ Pending messages are held in a mempool with:
 
 ## 9. Onchain Integration
 
-### 9.1 Tempo Integration Model
+### 9.1 Settlement Chain Integration Model
 
 Makechain blocks do not include relay-derived system messages.
 
-Tempo integration is message-local only:
+Settlement-chain integration is message-local only:
 
-1. `STORAGE_CLAIM` verification fetches finalized settlement evidence for a specific claim. The submitter signs the settlement block's timestamp in `StorageClaimBody.settlement_block_timestamp`; validators MUST verify it against the canonical Tempo block at verify-time, and non-validators (followers/readers/exporters) read it from the signed body for deterministic replay without any Tempo RPC.
+1. `STORAGE_CLAIM` verification fetches finalized settlement evidence for a specific claim. The submitter signs the settlement block's timestamp in `StorageClaimBody.settlement_block_timestamp`; validators MUST verify it against the canonical settlement-chain block at verify-time, and non-validators (followers/readers/exporters) read it from the signed body for deterministic replay without any settlement-chain RPC.
 2. (Reserved.) There is no ERC-1271 verification path; custody and verification signatures are verified locally from self-describing signature bytes, with no `eth_call`.
 
-No block-global checkpoint or Tempo frontier is committed, replayed, or published into consensus state. The per-message `settlement_block_timestamp` is narrower than a frontier: it authenticates only the single claim it travels with, validator-verified against Tempo and committed into `expires_at`.
+No block-global checkpoint or settlement-chain frontier is committed, replayed, or published into consensus state. The per-message `settlement_block_timestamp` is narrower than a frontier: it authenticates only the single claim it travels with, validator-verified against the settlement chain and committed into `expires_at`.
 
 ### 9.2 Relay Integration Scope
 
@@ -1286,7 +1286,7 @@ Persisted-block replay verification is tri-state:
 
 Replay verification is message-local. It applies only to message families that require external evidence, such as `STORAGE_CLAIM` settlement verification. Custody, signer-management, and verification-claim signatures require no external evidence and are fully verifiable from the message bytes alone.
 
-For `STORAGE_CLAIM`, only validators query Tempo: they verify the submitter-signed `settlement_block_timestamp` against the canonical Tempo block at verify-time. Non-validators (followers, readers, exporters) read that timestamp from the signed body and replay deterministically without any RPC, so `STORAGE_CLAIM` replay can yield `NotYetVerifiable` only on a validator performing live Tempo verification — never on a non-validator.
+For `STORAGE_CLAIM`, only validators query the settlement chain: they verify the submitter-signed `settlement_block_timestamp` against the canonical settlement-chain block at verify-time. Non-validators (followers, readers, exporters) read that timestamp from the signed body and replay deterministically without any RPC, so `STORAGE_CLAIM` replay can yield `NotYetVerifiable` only on a validator performing live settlement-chain verification — never on a non-validator.
 
 Disabled relay-era message families remain invalid during replay and fail closed immediately.
 
@@ -1352,10 +1352,10 @@ Messages accepted into the local mempool are forwarded to all connected validato
 ### 10.3 Sync
 
 New nodes joining the network:
-1. **State sync** — a cold-start node selects a finalized sync target via the [`GetSyncTarget`](../proto/makechain.proto) gRPC RPC (which returns the ops-only MMR root, the canonical state root, the finalization certificate, and the boundary block + execution payload), then proof-verifies and downloads QMDB state over the dedicated commonware-p2p QMDB-sync channel. The bulk state transfer is **not** a gRPC RPC; it runs on the p2p channel, so there is no `SyncFetch` service method.
+1. **State sync** — a cold-start node selects a finalized sync target via the [`GetSyncTarget`](../proto/makechain.proto) gRPC RPC (which returns the ops-only MMR root, the canonical state root, the finalization certificate, and the boundary block + execution payload), then proof-verifies and downloads state over the dedicated state-sync channel. The bulk state transfer is **not** a gRPC RPC; it runs on the p2p channel, so there is no `SyncFetch` service method.
 2. **Block sync** — once state is in place, a node fills the gap to the tip by replaying finalized `(Block, ExecutionPayload)` pairs streamed via [`SubscribeBlocks`](../proto/makechain.proto) (falling back to polling [`GetBlock`](../proto/makechain.proto)); there is no dedicated `SyncBlocks` RPC. The execution payload is consensus-critical because it carries the exact committed account-message order and project-message grouping.
 
-Auxiliary query surfaces support sync and verification: [`GetEpochState`](../proto/makechain.proto) returns the DKG group public key + verifier set for a late rejoin (no secrets), [`GetStateAttestation`](../proto/makechain.proto) returns a quorum certificate over the certified QMDB root at a height, and [`GetFinalizationCertificate`](../proto/makechain.proto) returns the direct finalization certificate for a block by digest.
+Auxiliary query surfaces support sync and verification: [`GetEpochState`](../proto/makechain.proto) returns the DKG group public key + verifier set for a late rejoin (no secrets), [`GetStateAttestation`](../proto/makechain.proto) returns a quorum certificate over the certified state root at a height, and [`GetFinalizationCertificate`](../proto/makechain.proto) returns the direct finalization certificate for a block by digest.
 
 ### 10.4 Follower Nodes
 
@@ -1478,9 +1478,9 @@ Specification versions use [CalVer](https://calver.org/) (`YYYY.M.PATCH`). Each 
 
 ### 13.1 Protocol Version Dispatch
 
-Protocol version is **derived from block height** via chainspec hardfork activation, never carried in a proposer-supplied block field. The runtime resolves the active rule set with `ConsensusConfig::hardfork_at(height)`, which returns the highest-activation hardfork whose threshold is `≤ height` (implicit `Hardfork::Genesis` floor at height 0). `Hardfork::Genesis` is the only variant today — no hardfork beyond genesis has been activated; future hardforks add a chainspec activation height, not a wire `version` field.
+Protocol version is **derived from block height** via chainspec hardfork activation, never carried in a proposer-supplied block field. The runtime resolves the active rule set with `hardfork_at(height)`, which returns the highest-activation hardfork whose threshold is `≤ height` (implicit `Hardfork::Genesis` floor at height 0). `Hardfork::Genesis` is the only variant today — no hardfork beyond genesis has been activated; future hardforks add a chainspec activation height, not a wire `version` field.
 
-- `BlockHeader` carries **no** `version` and **no** `chain_id` (both proto fields are reserved). A proposer cannot influence version dispatch.
+- `BlockHeader` carries **no** `version` field and **no** `chain_id` field. A proposer cannot influence version dispatch.
 - `ExecutionPayload.version` remains on the wire as a payload-format tag and MUST equal `6`; it is not the version-dispatch source.
 
 A node MUST dispatch block verification, execution, replay, and sync from `hardfork_at(height)`, and MUST reject an `ExecutionPayload` whose `version` is not `6`.
@@ -1529,20 +1529,20 @@ Replay and sync operate entirely within the canonical history and rule set defin
 | `STORAGE_RENTAL_PERIOD` | 365 days | Base storage rental period |
 | `STORAGE_GRACE_PERIOD` | 30 days | Grace period after rental expiry |
 | `STORAGE_TOTAL_PERIOD` | 395 days | `STORAGE_RENTAL_PERIOD + STORAGE_GRACE_PERIOD` |
-| `QMDB_KEY_SIZE` | 289 bytes | Fixed key size (287 usable + 2-byte length footer) |
+| `FIXED_KEY_SIZE` | 289 bytes | Fixed key size (287 usable + 2-byte length footer) |
 | `SIMPLEX_NAMESPACE` | `b"makechain-v0"` | Simplex BFT namespace for finalization certificates |
 
 ### Host Chain Mapping
 
-`host_chain_id(network)` returns the canonical EIP-155 chain ID of the Tempo settlement chain for the given Makechain network.
+`host_chain_id(network)` returns the canonical EIP-155 chain ID of the settlement chain for the given Makechain network.
 
 | Makechain Network | `host_chain_id(network)` | Notes |
 |-------------------|--------------------------|-------|
-| `DEVNET` | `42431` | Tempo Moderato |
-| `TESTNET` | `42431` | Tempo Moderato |
-| `MAINNET` | `4217` | Tempo mainnet |
+| `DEVNET` | `42431` | Settlement testnet |
+| `TESTNET` | `42431` | Settlement testnet |
+| `MAINNET` | `4217` | Settlement mainnet |
 
-`QMDB_KEY_SIZE` (289 bytes; 287 usable + 2-byte length footer) and
+`FIXED_KEY_SIZE` (289 bytes; 287 usable + 2-byte length footer) and
 `SIMPLEX_NAMESPACE` (`b"makechain-v0"`, the Simplex BFT finalization-certificate
 namespace) are listed with the protocol constants above.
 
@@ -1552,7 +1552,7 @@ The per-network `settlement_contract_address(network)` and `settlement_finality_
 
 | Makechain Network | `settlement_contract_address(network)` | `settlement_finality_depth(network)` | Notes |
 |-------------------|----------------------------------------|--------------------------------------:|-------|
-| `DEVNET` | `0x930dc180AaD00fc9302278d502Ff8b52bB0a0F79` | `1` | Tempo Moderato `StorageRelay` proxy |
+| `DEVNET` | `0x930dc180AaD00fc9302278d502Ff8b52bB0a0F79` | `1` | Settlement testnet `StorageRelay` proxy |
 | `TESTNET` | `0x0000000000000000000000000000000000000000` | `1` | Fail-closed until the canonical testnet `StorageRelay` is deployed |
 | `MAINNET` | `0x0000000000000000000000000000000000000000` | `1` | Fail-closed until a canonical mainnet `StorageRelay` is deployed |
 
@@ -1564,9 +1564,9 @@ The canonical wire format for all protocol messages is [Protocol Buffers v3][pro
 
 ### B.1 Canonical Encoding Rules
 
-The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output. As of `2026.6.1`, the reference Rust implementation is normative. Independent implementations SHOULD match published conformance vectors rather than infer canonicalization from generic Protocol Buffers behavior alone.
+The `canonical_encode` function used for hashing (`H(canonical_encode(data))`) MUST produce deterministic output following the rules below. Independent implementations MUST match published conformance vectors to confirm byte-exact compatibility.
 
-The reference encoding follows these rules:
+Canonical encoding follows these rules:
 
 1. Fields MUST be serialized in ascending field-number order.
 2. Proto3 default values (0 for integers, empty for strings/bytes, 0 for enums) MUST be omitted from the wire format.
@@ -1574,44 +1574,44 @@ The reference encoding follows these rules:
 4. `map` fields are not used in this protocol.
 5. Unknown fields MUST NOT be present in canonical encodings.
 6. Varint encoding MUST use the minimum number of bytes (no leading zero bytes beyond what the standard encoding requires).
-7. The reference implementation uses [prost][prost] `Message::encode_to_vec()` after enforcing the above constraints. This draft does not claim that arbitrary Protocol Buffers implementations will serialize canonically without conformance testing.
+7. A standard Protocol Buffers encoder MAY be used as a starting point once the above constraints (field ordering, default omission, etc.) are enforced on top of it; conformance vectors are required to confirm byte-exact compatibility, since generic Protocol Buffers libraries do not guarantee canonical output on their own.
 
 ### B.2 State Value Encoding
 
-State values stored under the key schema (Section 6.1) are serialized as JSON using the following conventions. The Rust reference implementation is normative, and byte-for-byte compatibility with that encoding is consensus-critical.
+State values stored under the key schema (Section 6.1) are serialized as JSON using the following conventions, which are consensus-critical and byte-for-byte normative.
 
 - Fields are serialized in struct declaration order.
 - `u32`, `u64`, `i32`, `i64` are serialized as JSON numbers.
-- `Vec<u8>` and `[u8; N]` are serialized as JSON arrays of integers (e.g., `[66,66,66]`), NOT as hex strings or base64.
-- `Option<T>` is serialized as `null` when absent, or the inner value when present.
+- Byte arrays and fixed-size byte sequences are serialized as JSON arrays of integers (e.g., `[66,66,66]`), NOT as hex strings or base64.
+- An optional field is serialized as `null` when absent, or the inner value when present.
 - `String` is serialized as a JSON string.
-- `Vec<[u8; 32]>` (e.g., `allowed_projects`) is serialized as a JSON array of arrays.
+- A list of fixed-size byte sequences (e.g., `allowed_projects`) is serialized as a JSON array of arrays.
 - Boolean fields are serialized as JSON `true`/`false`.
-- Fields with `#[serde(default)]` MUST be present when writing (not conditionally omitted).
+- Fields with a default value MUST be present when writing, not conditionally omitted.
 
-The reference implementation uses Rust's `serde_json` library. Independent implementations MUST verify exact byte compatibility against conformance vectors before claiming consensus compatibility.
+Independent implementations MUST verify exact byte compatibility against conformance vectors before claiming consensus compatibility.
 
 ### B.3 Block Hash
 
-Block hash: `keccak256(canonical_encode(BlockHeader))` where `canonical_encode` follows the same `commonware-codec` determinism rules as [`MessageData`](../proto/makechain.proto) encoding; see [`BlockHeader`](../proto/makechain.proto). The block hash uses **keccak256** (not BLAKE3) for Ethereum-tooling / light-client / EIP-1186 compatibility; the `MessageData` envelope hash and content-addressed identifiers (project IDs, commit hashes) remain BLAKE3.
+Block hash: `keccak256(canonical_encode(BlockHeader))` where `canonical_encode` follows the determinism rules defined in B.1 for [`MessageData`](../proto/makechain.proto) encoding; see [`BlockHeader`](../proto/makechain.proto). The block hash uses **keccak256** (not BLAKE3) for Ethereum-tooling / light-client / EIP-1186 compatibility; the `MessageData` envelope hash and content-addressed identifiers (project IDs, commit hashes) remain BLAKE3.
 
 ### B.4 Proposal Digest
 
 The proposal digest committed by `consensus_finalization` is the **canonical block hash** of the block reconstructed from the execution payload `R`:
 
 ```
-proposal_digest(R) = keccak256(commonware_codec(block.header))   // == compute_block_hash(block)
+proposal_digest(R) = keccak256(canonical_encode(block.header))   // == compute_block_hash(block)
 ```
 
-The header's `transactions_root` binds the block's message set, so hashing the header commits to the full block. A domain-separated BLAKE3 digest of the encoded `ExecutionPayload` (`H(b"makechain:execution-payload:v2" || len || wire)`, where `wire` is the canonical `commonware-codec` encoding) is retained only as a reconstruction-failure fallback, not as the signed commitment.
+The header's `transactions_root` binds the block's message set, so hashing the header commits to the full block. A domain-separated BLAKE3 digest of the encoded `ExecutionPayload` (`H(b"makechain:execution-payload:v2" || len || wire)`, where `wire` is the canonical encoding) is retained only as a reconstruction-failure fallback, not as the signed commitment.
 
 Field ordering within the [`ProjectMessages`](../proto/makechain.proto) entries in `project_messages` is consensus-critical: entries MUST appear in byte-lexicographic order of their 32-byte `project_id`. Implementations that do not guarantee this ordering will produce a different digest and fail verification.
 
-## Appendix C: Tempo Integration Summary (Non-Normative)
+## Appendix C: Settlement Chain Integration Summary (Non-Normative)
 
-The `Genesis` baseline does not treat Tempo contracts as block-message producers.
+The `Genesis` baseline does not treat settlement-chain contracts as block-message producers.
 
-Tempo dependencies are message-local only:
+Settlement-chain dependencies are message-local only:
 
 - `STORAGE_CLAIM` verifies finalized settlement-chain evidence for a specific claim.
 
@@ -1720,10 +1720,8 @@ Validator identity is configured out-of-band via node configuration, not via gen
 [eip712]: https://eips.ethereum.org/EIPS/eip-712
 [eip155]: https://eips.ethereum.org/EIPS/eip-155
 [simplex]: https://eprint.iacr.org/2023/463
-[commonware]: https://commonware.xyz
 [protobuf]: https://protobuf.dev/programming-guides/proto3/
 [webauthn]: https://www.w3.org/TR/webauthn-3/
-[prost]: https://github.com/tokio-rs/prost
 
 | Label | Reference |
 |-------|-----------|
@@ -1735,7 +1733,5 @@ Validator identity is configured out-of-band via node configuration, not via gen
 | EIP-712 | R. Bloemen, L. Logvinov, J. Evans, "Typed structured data hashing and signing." |
 | EIP-155 | V. Buterin, "Simple replay attack protection," October 2016. |
 | Simplex | B. Y. Chan and R. Pass, "Simplex Consensus: A Simple and Fast Consensus Protocol," 2023. |
-| Commonware | Commonware Library — consensus, p2p, storage, and cryptography primitives. |
 | Protocol Buffers | Google, "Protocol Buffers v3 Language Guide." |
 | WebAuthn | W3C, "Web Authentication: An API for accessing Public Key Credentials," Level 3. |
-| prost | tokio-rs, "Protocol Buffers implementation for Rust." |

@@ -263,7 +263,7 @@ message StorageClaimBody {
   uint64 settlement_chain_id = 3;   // Host-chain EIP-155 chain id
   uint32 settlement_log_index = 4;  // Receipt-local log index
   bytes actor = 5;                  // 20-byte EVM address that paid or credited the settlement
-  uint32 settlement_block_timestamp = 6;  // Tempo settlement-block timestamp; submitter-supplied, validator-verified against Tempo, read by followers for deterministic replay
+  uint32 settlement_block_timestamp = 6;  // Settlement-chain block timestamp; submitter-supplied, validator-verified against the settlement chain, read by followers for deterministic replay
 }
 
 message UsernameCreateBody {
@@ -283,8 +283,6 @@ message VerificationAddBody {
   bytes address                      = 2;  // External address/identifier (e.g. 20-byte Ethereum address)
   bytes claim_signature              = 3;  // Signature from the external key proving ownership
   bytes chain_id                     = 4;  // Chain identifier (e.g. 1 = Ethereum mainnet, 10 = Optimism)
-  reserved 5, 6;
-  reserved "claim_key_type", "claim_block_hash";
 }
 
 message VerificationRemoveBody {
@@ -380,8 +378,6 @@ message SignerAddBody {
   uint64 valid_after = 9;               // Earliest unix timestamp accepted for this authorization
   uint64 valid_before = 10;             // Latest unix timestamp accepted for this authorization
   bytes request_owner_address = 11;     // 20-byte owner address of requesting app when known
-  reserved 5, 8, 12, 13;
-  reserved "custody_key_type", "request_key_type", "custody_block_hash", "request_block_hash";
 }
 
 message SignerRemoveBody {
@@ -390,8 +386,6 @@ message SignerRemoveBody {
   uint64 nonce = 4;                     // Must match account custody_nonce (replay protection)
   uint64 valid_after = 5;               // Earliest unix timestamp accepted for this authorization
   uint64 valid_before = 6;              // Latest unix timestamp accepted for this authorization
-  reserved 3, 7;
-  reserved "custody_key_type", "custody_block_hash";
 }
 
 enum CustodySignatureType {
@@ -449,7 +443,7 @@ message ProjectMessages {
 
 // Canonical execution input `R`. `proto::Block` is self-contained (it
 // carries `account_messages` directly), but `ExecutionPayload` remains the
-// canonical execution input: `proposal_digest(R) = keccak256(commonware_codec(
+// canonical execution input: `proposal_digest(R) = keccak256(canonical_encode(
 // reconstruct_block(R).header))` is the block hash committed by
 // `consensus_finalization` (see SPECIFICATION.md §8.2). `GetBlockResponse`
 // and `GetSyncTargetResponse` serve it alongside `Block`, and persisted
@@ -466,12 +460,12 @@ message ExecutionPayload {
   uint32 version = 8;                        // execution payload version
   bytes dealer_log = 9;                      // Optional raw signed dealer-log bytes committed with the block (see Block.dealer_log)
   bytes dkg_outcome = 10;                    // Canonical OnchainDkgOutcome bytes for boundary blocks
-  // #698 step 3: the glue sync-target fields that get stamped into the block
-  // header (`BlockHeader.ops_root` + op-range). Carried on the envelope so the
+  // The sync-target fields that get stamped into the block header
+  // (`BlockHeader.ops_root` + op-range). Carried on the envelope so the
   // proposer→verifier `proposal_digest` (which IS the consensus commitment,
   // rebuilt via `compute_block_hash`) commits to them identically on both
   // sides. Empty/zero on no-batch (recovery / harness) envelopes.
-  bytes  ops_root        = 11;               // QMDB ops-only MMR root (32 bytes), empty when no merkleized batch
+  bytes  ops_root        = 11;               // Ops-only MMR root (32 bytes), empty when no merkleized batch
   uint64 ops_range_start = 12;
   uint64 ops_range_end   = 13;
 }
@@ -491,15 +485,13 @@ message SubblockPayload {
 // ============================================================
 
 message Height {
-  // `shard_index` is reserved and not part of the wire format. Height is a
-  // single `u64 block_number` — Tempo uses raw u64 `BlockNumber` and
-  // Commonware's `Heightable` trait carries a single u64; there is no
-  // multi-shard indexing scheme. Because buffa eagerly encodes the
-  // proto3-default zero for absent fields, reintroducing `shard_index` with
-  // a different meaning would rotate the encoded `Height` (and any digest
-  // that hashes a reconstructed Block, e.g. proposal_digest).
-  reserved 1;
-  reserved "shard_index";
+  // `shard_index` is not part of the wire format. Height is a single
+  // `u64 block_number`; there is no multi-shard indexing scheme, and the
+  // consensus layer models height as a single u64. Because a proto3-default
+  // zero for an absent field encodes indistinguishably from an explicit
+  // zero, reintroducing `shard_index` with a different meaning would rotate
+  // the encoded `Height` (and any digest that hashes a reconstructed Block,
+  // e.g. proposal_digest).
   uint64 block_number = 2;
 }
 
@@ -515,19 +507,6 @@ message Block {
   // (including `compute_block_hash`) does not need to decode the body; light
   // clients can fetch headers alone.
   BlockBody   body   = 2;
-  reserved 3;
-  reserved "witness";
-  reserved 4;
-  reserved 5;
-  reserved "user_messages";
-  reserved 6;
-  reserved "consensus_finalization";
-  reserved 7;
-  reserved "dealer_log";
-  reserved 8;
-  reserved "account_messages";
-  reserved 9;
-  reserved "dkg_outcome";
 }
 
 // Application-defined body for a `Block`. Carries the user/account
@@ -549,50 +528,44 @@ message BlockBody {
   // `Block`) for consensus verification and sync (see SPECIFICATION.md
   // §8.2).
   repeated Message account_messages = 2;
-  // commonware-codec Finalization<ed25519, BlockDigest>
+  // Canonically-encoded finalization certificate over the block digest.
   bytes consensus_finalization      = 3;
-  // Raw `commonware-codec`-encoded `SignedDealerLog<MinSig, ed25519>` —
-  // the proposer's onchain dealer-log evidence. Present only on
-  // late-phase non-boundary blocks; empty otherwise. Header-bound by
-  // `BlockHeader.dealer_log_hash`. Dealer identity is authenticated by
-  // the signature inside the log; epoch is derivable from block height
-  // via `Epocher::containing(height)`. Verifier rejects:
+  // Raw canonically-encoded `SignedDealerLog` bytes — the proposer's
+  // onchain dealer-log evidence. Present only on late-phase non-boundary
+  // blocks; empty otherwise. Header-bound by `BlockHeader.dealer_log_hash`.
+  // Dealer identity is authenticated by the signature inside the log;
+  // epoch is derivable from block height. Verifier rejects:
   //   - non-empty bytes outside late-phase blocks
   //   - bytes that do not decode as exactly one `SignedDealerLog`
   //   - any entry whose dealer != block proposer
   bytes dealer_log                  = 4;
   // Canonical OnchainDkgOutcome bytes — present on the boundary block
   // of each epoch; absent otherwise. Header-bound by
-  // `BlockHeader.dkg_outcome_hash`. Decoded via
-  // `makechain_consensus::dkg::read_dkg_outcome`. Carries the group
-  // public key + verifier set + next-ceremony scheduling for
-  // `epoch + 1`.
+  // `BlockHeader.dkg_outcome_hash`. Carries the group public key +
+  // verifier set + next-ceremony scheduling for `epoch + 1`.
   bytes dkg_outcome                 = 5;
 }
 
-// Consensus context committed to in the block header. Mirrors upstream
-// `commonware_consensus::simplex::types::Context<D, P>` (commonware-consensus
-// v2026.4 src/simplex/types.rs:21-33), which carries the round, leader, and
-// parent (view, digest) used by the certifiable-block deferred-verification
-// path.
+// Consensus context committed to in the block header. Mirrors the Simplex
+// consensus round context, which carries the round, leader, and parent
+// (view, digest) used by the certifiable-block deferred-verification path.
 //
 // Fields:
-//   - `round_epoch` / `round_view`  -> `Round { epoch, view }`
-//   - `leader_public_key`           -> `P` (32-byte Ed25519 PublicKey)
-//   - `parent_view`                 -> `parent: (View, D)` (D = BlockDigest)
+//   - `round_epoch` / `round_view`  -> round { epoch, view }
+//   - `leader_public_key`           -> 32-byte Ed25519 public key of the leader
+//   - `parent_view`                 -> parent (view, digest)
 //
-// The simplex `parent.1` digest is NOT serialised here — it is recovered
+// The parent digest is NOT serialised here — it is recovered
 // from `BlockHeader.parent_hash` (the canonical chain link), avoiding the
 // redundant copy that produced extra surface area to keep in sync.
 //
 // All numeric fields are wire-encoded as proto3 varints; the leader public
 // key is verified by consensus on decode (32 bytes).
 message ConsensusContext {
-  uint64 round_epoch        = 1;  // Round.epoch (commonware Epoch, u64)
-  uint64 round_view         = 2;  // Round.view  (commonware View,  u64)
+  uint64 round_epoch        = 1;  // Round epoch
+  uint64 round_view         = 2;  // Round view
   bytes leader_public_key   = 3;  // 32 bytes Ed25519 public key of the round leader
-  uint64 parent_view        = 4;  // simplex View of the parent proposal
-  reserved 5;                     // parent_digest — see BlockHeader.parent_hash
+  uint64 parent_view        = 4;  // Simplex view of the parent proposal
 }
 
 message BlockHeader {
@@ -603,24 +576,19 @@ message BlockHeader {
   // protocol version determined by chainspec; storing the proposer's
   // claimed version inline would invite fork-ambiguity bugs (which version
   // applies at the activation height?) and a 4-byte cost per block for a
-  // value derivable from height. Canonical pattern (Tempo / Reth / all
-  // Commonware-based chains): dispatch reads `chainspec.hardfork_at(height)`
-  // instead. See `makechain_consensus::config::ConsensusConfig::hardfork_at`.
-  reserved 3;
-  reserved "version";
+  // value derivable from height. Dispatch instead reads
+  // `chainspec.hardfork_at(height)` — see Protocol Versioning in
+  // SPECIFICATION.md.
+  //
   // Per-block chain_id adds no security on top of signature-scheme
-  // namespacing. The consensus signing namespace is network-bound (see
-  // `crate::engine::consensus_namespace`) — devnet certs cannot verify on
-  // mainnet because the verifier's namespace bytes differ. Field 4 is
-  // reserved permanently.
-  reserved 4;
+  // namespacing. The consensus signing namespace is network-bound — certs
+  // signed for one network cannot verify on another because the verifier's
+  // namespace bytes differ.
   bytes parent_hash        = 5;
   bytes state_root         = 6;
-  // Consensus context the proposer used when building this block. Mirrors
-  // `simplex::types::Context<D, P>` so that `CertifiableBlock::context()`
-  // can reconstruct it for deferred verification. Currently optional — a
-  // zero-value default decodes as `Round{0,0}` with an empty leader and
-  // parent_digest.
+  // Consensus context the proposer used when building this block, enabling
+  // deferred verification. Currently optional — a zero-value default
+  // decodes as round {0,0} with an empty leader and parent_digest.
   ConsensusContext context = 7;
   // BLAKE3 over `Block.dkg_outcome` bytes when present; zero-length when
   // the block carries no outcome. Verifier checks
@@ -633,24 +601,20 @@ message BlockHeader {
   // is non-empty. Header-bound for finality anchoring, paralleling
   // `dkg_outcome_hash`.
   bytes dealer_log_hash    = 9;
-  // commonware-storage BMT root over the block's message hashes —
-  // `account_messages` first, then `user_messages`, each
-  // leaf being the 32-byte `Message.hash`. Hashed with BLAKE3 via
-  // `commonware_cryptography::blake3::Blake3`. Zero-length when the block
+  // Binary Merkle Tree (BMT) root over the block's message hashes —
+  // `account_messages` first, then `user_messages`, each leaf being the
+  // 32-byte `Message.hash`. Hashed with BLAKE3. Zero-length when the block
   // carries no messages; 32 bytes when at least one is present. Verifier
   // re-derives the root from the body and compares; mismatch is a fork-
   // evidence error. Enables light-client message-inclusion proofs without
-  // shipping block bodies — see `GetMessageInclusionProof` RPC. Pairs with
-  // the Tempo `transactions_root` field on `alloy_consensus::Header`.
+  // shipping block bodies — see `GetMessageInclusionProof` RPC.
   bytes transactions_root  = 10;
-  // #698 (glue adoption, step 3): the QMDB ops-only MMR root and the op-count
-  // range `[sync_boundary, total_size)` the glue `Stateful` wrapper's sync
-  // target is built from. `state_root` (field 6) stays the CANONICAL QMDB root;
-  // these are ADDITIONAL fields the witness-free `qmdb::sync::Target { root,
-  // range }` (commonware PR #3887) needs to reconstruct a sync target from a
-  // block header alone — values produced by the merkleized batch
-  // (`ops_root()`, `sync_boundary()`, `bounds().total_size`). Zero on blocks
-  // built without a merkleized batch (genesis, tests, sync-replayed bodies).
+  // The ops-only Merkle Mountain Range (MMR) root and the op-count range
+  // `[sync_boundary, total_size)` a sync target is built from. `state_root`
+  // (field 6) stays the canonical state root; these are additional fields
+  // needed to reconstruct a sync target from a block header alone, produced
+  // by the merkleized batch. Zero on blocks built without a merkleized
+  // batch (genesis, tests, sync-replayed bodies).
   bytes  ops_root         = 11;
   uint64 ops_range_start  = 12;
   uint64 ops_range_end    = 13;
@@ -728,7 +692,7 @@ service MakechainService {
   rpc GetMessage(GetMessageRequest) returns (GetMessageResponse);
   rpc ListMessages(ListMessagesRequest) returns (ListMessagesResponse);
   // Light-client message inclusion proof.
-  // Returns a commonware-storage BMT proof that proves the supplied
+  // Returns a Binary Merkle Tree (BMT) proof that proves the supplied
   // `message_hash` is one of the messages committed to in the block
   // identified by `block_hash`'s header `transactions_root` field.
   // The verifier reconstructs the proof and calls
@@ -741,8 +705,8 @@ service MakechainService {
   rpc GetNodeStatus(GetNodeStatusRequest) returns (GetNodeStatusResponse);
   rpc GetChainStats(GetChainStatsRequest) returns (GetChainStatsResponse);
 
-  // State attestation (#698): the threshold-BLS-certified post-execution QMDB
-  // root at a height, produced by the consensus::aggregation track.
+  // State attestation: the threshold-BLS-certified post-execution state
+  // root at a height.
   rpc GetStateAttestation(GetStateAttestationRequest) returns (GetStateAttestationResponse);
 
   // Snapshots
@@ -767,22 +731,21 @@ service MakechainService {
   rpc SubscribeMessages(SubscribeRequest) returns (stream Message);
   rpc SubscribeBlocks(SubscribeBlocksRequest) returns (stream BlockEvent);
 
-  // Sync — finalized tip discovery for cold-start QMDB sync.
-  // Body sources height + digest + finalization cert via the canonical
-  // commonware-marshal mailbox (MarshalCoreMailbox::get_info +
-  // get_finalization). Block bytes are fetched separately via GetBlock.
+  // Sync — finalized tip discovery for cold-start state sync. Returns
+  // height + digest + finalization cert. Block bytes are fetched
+  // separately via GetBlock.
   rpc GetSyncTarget(GetSyncTargetRequest) returns (GetSyncTargetResponse);
 
   // Late-rejoin — fetch a past epoch's public DKG output
   // (dealers + threshold polynomial) so a node that wasn't in the DKG
   // round can boot in observer mode after authenticated state sync.
-  // The threshold group identity is constant across Commonware reshares,
-  // so the caller authenticates the response by checking
-  // Output.public() == its locally trusted identity. The server NEVER
-  // returns the local share — public material only.
+  // The threshold group identity is constant across reshares, so the
+  // caller authenticates the response by checking it against its locally
+  // trusted identity. The server NEVER returns the local share — public
+  // material only.
   rpc GetEpochState(GetEpochStateRequest) returns (GetEpochStateResponse);
 
-  // Proofs — QMDB current-state proofs. GetStateProof is a single
+  // Proofs — current-state proofs. GetStateProof is a single
   // polymorphic RPC: callers request a set of keys and per-key existence
   // (operation vs. exclusion) is determined server-side.
   rpc GetStateProof(GetStateProofRequest) returns (GetStateProofResponse);
@@ -791,12 +754,11 @@ service MakechainService {
   rpc VerifyOperationProofAtBlock(VerifyOperationProofAtBlockRequest) returns (VerifyOperationProofAtBlockResponse);
   rpc VerifyExclusionProofAtBlock(VerifyExclusionProofAtBlockRequest) returns (VerifyExclusionProofAtBlockResponse);
 
-  // PR-a of tracker #651 — fetch a stored direct finalization certificate by
-  // block digest. Reads from the never-pruned immutable certificates
-  // archive opened at validator/exporter init. Returns the
-  // commonware-codec-encoded `Finalization<MakechainScheme, BlockDigest>`
-  // bytes when the requested block has a direct certificate. Indirectly
-  // finalized ancestors may not have one.
+  // Fetch a stored direct finalization certificate by block digest. Reads
+  // from the never-pruned immutable certificates archive. Returns the
+  // canonically-encoded finalization certificate bytes when the requested
+  // block has a direct certificate. Indirectly finalized ancestors may not
+  // have one.
   rpc GetFinalizationCertificate(GetFinalizationCertificateRequest)
       returns (GetFinalizationCertificateResponse);
 }
@@ -1128,16 +1090,14 @@ message GetActivityResponse {
 
 message GetBlockRequest {
   // Height-keyed lookup. When set, the server returns block + finalization
-  // cert (if it has one). Used by validators for QMDB sync target fetch
+  // cert (if it has one). Used by validators for state sync target fetch
   // where the requested height is the sync boundary (always cert-bearing).
   uint64 block_number = 1;
-  // Digest-keyed lookup (canonical Commonware backfill, per
-  // `consensus/src/marshal/core/actor.rs:1641 try_repair_gaps` ancestor
-  // walk). When set (non-empty 32-byte digest), the server looks up by
-  // block digest and returns block ONLY — no finalization cert is
-  // attached because intermediate blocks are finalized transitively via
-  // descendant certs (`marshal/core/actor.rs:1466-1468`). Used by
-  // follower marshal+resolver to walk parent digests backward from a
+  // Digest-keyed lookup, used for a canonical backfill ancestor walk. When
+  // set (non-empty 32-byte digest), the server looks up by block digest
+  // and returns block ONLY — no finalization cert is attached because
+  // intermediate blocks are finalized transitively via descendant certs.
+  // Used by followers to walk parent digests backward from a
   // verified-cert tip.
   bytes block_digest = 2;
 }
@@ -1186,8 +1146,8 @@ message GetMessageInclusionProofRequest {
 }
 
 message GetMessageInclusionProofResponse {
-  // commonware-codec-encoded `commonware_storage::bmt::Proof<BlockDigest>`.
-  // Decoded via `Proof::decode_cfg(proof, &1)`.
+  // Canonically-encoded Binary Merkle Tree (BMT) proof bytes over the
+  // block digest.
   bytes proof              = 1;
   // The canonical leaf position used during proof construction.
   // `account_messages` occupy `[0, account_len)`; `user_messages`
@@ -1262,8 +1222,8 @@ message GetNodeStatusResponse {
   ReplayVerificationInfo replay_verification = 9;
   // Local validator's encoded Ed25519 public key (32 bytes). Empty for
   // non-validator nodes (readers, exporters). Used by sync peers to map
-  // a gRPC endpoint back to its validator identity for qmdb-sync target
-  // selection. See Task #121.
+  // a gRPC endpoint back to its validator identity for state-sync target
+  // selection.
   bytes validator_public_key = 10;
 }
 
@@ -1286,10 +1246,10 @@ message GetChainStatsResponse {
   uint32 total_reactions = 12;
 }
 
-// --- State Attestation (#698) ---
+// --- State Attestation ---
 
 message GetStateAttestationRequest {
-  // Block height whose certified post-execution QMDB root is requested.
+  // Block height whose certified post-execution state root is requested.
   uint64 height = 1;
 }
 
@@ -1299,9 +1259,9 @@ message GetStateAttestationResponse {
   bool present = 1;
   // Echoed request height.
   uint64 height = 2;
-  // The certified post-execution QMDB root (32 bytes). Empty when !present.
+  // The certified post-execution state root (32 bytes). Empty when !present.
   bytes root = 3;
-  // commonware-codec-encoded threshold-BLS certificate over (height, root).
+  // Canonically-encoded threshold-BLS certificate over (height, root).
   // Verifiable offline against the epoch group public key. Empty when !present.
   bytes certificate = 4;
 }
@@ -1318,8 +1278,6 @@ message VerificationEntry {
   VerificationType verification_type = 1;
   bytes address = 2;
   bytes chain_id = 3;
-  reserved 4, 5;
-  reserved "claim_key_type", "claim_block_hash";
 }
 
 message ListVerificationsResponse {
@@ -1465,7 +1423,7 @@ message SubscribeBlocksRequest {}
 
 // Compact event the gateway used to synthesize as SSE
 // (`/v1/subscribe/blocks`). Promoted to a first-class Connect-ES
-// server-streaming RPC in #564 so browser clients consume the typed
+// server-streaming RPC so browser clients consume the typed
 // stream directly over HTTP/1.1 chunked or HTTP/2 streaming without an
 // SSE translation layer.
 message BlockEvent {
@@ -1552,18 +1510,17 @@ message GetCommitAncestorsResponse {
   repeated CommitMeta commits = 1;
 }
 
-// --- QMDB Proof-Verified Sync (Task #117 canonical restoration) ---
+// --- Proof-Verified Sync ---
 //
-// Tip-discovery primitive for cold-start QMDB sync. The bulk operation
-// transfer that follows lives on P2P channel 8 (see
-// `crates/makechain-sync/src/p2p_sync.rs`); this gRPC RPC only carries the
-// finalized-tip metadata + finalization cert needed to compute the byzantine
-// `verify_fetched_sync_target` decision before opening the channel-8 fetch.
+// Tip-discovery primitive for cold-start state sync. The bulk operation
+// transfer that follows lives on a dedicated P2P channel; this gRPC RPC
+// only carries the finalized-tip metadata + finalization cert needed to
+// verify the fetched sync target before opening that transfer.
 
 message GetSyncTargetRequest {}
 
 message GetSyncTargetResponse {
-  bytes root = 1;              // 32-byte QMDB ops MMR root digest (Blake3)
+  bytes root = 1;              // 32-byte ops MMR root digest (BLAKE3)
   uint64 range_start = 2;     // Operation location range start (inclusive)
   uint64 range_end = 3;       // Operation location range end (exclusive)
   uint64 block_number = 4;    // Block number at this sync point
@@ -1602,30 +1559,31 @@ message GetEpochStateResponse {
 // GetStateProof — polymorphic per-key state proof RPC. For each requested
 // key the server inspects existence and returns either an operation proof
 // (key present, with value) or an exclusion proof (key absent). All
-// returned proofs are anchored at a single shared QMDB root.
+// returned proofs are anchored at a single shared state root.
 //
 // Compound 2P-set and storage-quota use cases compose at the client side by sending
 // the relevant set of keys (active + tombstone + prune_marker; or storage_grant keys
 // derived against an account) in one call.
 message GetStateProofRequest {
-  repeated bytes keys = 1;  // Raw supported public state keys (not QMDB-padded). May be empty
-                            // to request the current state root only with no per-key proofs.
+  repeated bytes keys = 1;  // Raw supported public state keys (not fixed-size padded). May
+                            // be empty to request the current state root only with no
+                            // per-key proofs.
 }
 
 message KeyProof {
   bytes key = 1;          // Echoed raw state key from the request
   bytes value = 2;        // Current value of the key. Empty iff is_exclusion = true
-  bytes proof = 3;        // Native commonware-codec proof bytes (operation or exclusion body)
+  bytes proof = 3;        // Native canonically-encoded proof bytes (operation or exclusion body)
   bool is_exclusion = 4;  // True iff proof is an exclusion proof; false iff operation proof
 }
 
 message GetStateProofResponse {
-  bytes root = 1;            // 32-byte canonical current QMDB root shared by all proofs
+  bytes root = 1;            // 32-byte canonical current state root shared by all proofs
   repeated KeyProof proofs = 2;
 }
 
 message VerifyOperationProofRequest {
-  bytes proof = 1;  // Native commonware-codec operation-proof bytes (from KeyProof.proof, GetStateProof)
+  bytes proof = 1;  // Native canonically-encoded operation-proof bytes (from KeyProof.proof, GetStateProof)
   bytes key = 2;    // Raw state key (same format as GetStateProofRequest.keys entries)
   bytes root = 3;   // 32-byte root the proof was generated against (from GetStateProofResponse.root)
   bytes value = 4;  // The current value of the key (from KeyProof.value, GetStateProof)
@@ -1638,7 +1596,7 @@ message VerifyOperationProofResponse {
 }
 
 message VerifyExclusionProofRequest {
-  bytes proof = 1;  // Native commonware-codec exclusion-proof bytes (from KeyProof.proof, GetStateProof)
+  bytes proof = 1;  // Native canonically-encoded exclusion-proof bytes (from KeyProof.proof, GetStateProof)
   bytes key = 2;    // Raw state key (same format as GetStateProofRequest.keys entries)
   bytes root = 3;   // 32-byte root the proof was generated against (from GetStateProofResponse.root)
 }
@@ -1650,7 +1608,7 @@ message VerifyExclusionProofResponse {
 }
 
 message VerifyOperationProofAtBlockRequest {
-  bytes proof = 1;         // Native commonware-codec operation-proof bytes (from KeyProof.proof, GetStateProof)
+  bytes proof = 1;         // Native canonically-encoded operation-proof bytes (from KeyProof.proof, GetStateProof)
   bytes key = 2;           // Raw state key (same format as GetStateProofRequest.keys entries)
   uint64 block_number = 3; // Canonical finalized block number whose state root must match the proof root
   bytes value = 4;         // The value of the key (from KeyProof.value, GetStateProof)
@@ -1664,7 +1622,7 @@ message VerifyOperationProofAtBlockResponse {
 }
 
 message VerifyExclusionProofAtBlockRequest {
-  bytes proof = 1;         // Native commonware-codec exclusion-proof bytes (from KeyProof.proof, GetStateProof)
+  bytes proof = 1;         // Native canonically-encoded exclusion-proof bytes (from KeyProof.proof, GetStateProof)
   bytes key = 2;           // Raw state key (same format as GetStateProofRequest.keys entries)
   uint64 block_number = 3; // Canonical finalized block number whose state root must match the proof root
 }
@@ -1681,14 +1639,13 @@ message VerifyExclusionProofAtBlockResponse {
 // client-side by sending the relevant set of keys to GetStateProof in one
 // call.
 
-// PR-a of tracker #651 — GetFinalizationCertificate request/response.
 message GetFinalizationCertificateRequest {
   bytes block_hash = 1;  // 32-byte block digest
 }
 
 message GetFinalizationCertificateResponse {
-  // commonware-codec-encoded direct `Finalization<MakechainScheme, BlockDigest>`
-  // bytes. Empty when the archive does not have a direct cert for the requested
-  // digest (treat as NotFound).
+  // Canonically-encoded direct finalization certificate bytes over the
+  // block digest. Empty when the archive does not have a direct cert for
+  // the requested digest (treat as NotFound).
   bytes certificate = 1;
 }
