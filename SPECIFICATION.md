@@ -400,7 +400,7 @@ apply_block(σ, B, R) → σ':
 
 Dropped messages are excluded from the committed block but do not halt execution.
 
-> **Note:** Projects are usually independent state domains, but `MERGE_REQUEST_ADD` includes requester-global Layer 1 quota checks that can couple adds by the same requester across different target projects (see the INV-3 exception in Appendix D). Future implementations MAY execute project groups in parallel only if they preserve equivalence to the canonical serial execution order, including these requester-global dependencies.
+Projects are usually independent state domains, but `MERGE_REQUEST_ADD` includes requester-global Layer 1 quota checks that can couple adds by the same requester across different target projects (see the INV-3 exception in Appendix D). Project groups MAY be executed in parallel only if the scheme preserves equivalence to the canonical serial execution order, including these requester-global dependencies.
 
 #### Message Dispatch
 
@@ -1228,7 +1228,7 @@ Persisted block verification therefore requires both the finalized [`Block`](../
 
 The `proposal_digest(R)` value — the canonical block hash — is what validators sign in finalization certificates. Because it is the block hash, the finalization certificate commits to the block header (and, transitively, the full block content), giving light clients an Ethereum-compatible commitment.
 
-> **Protocol Versioning:** The network uses a single canonical protocol rule set. Protocol-version dispatch is derived from block **height** via chainspec hardfork activation (`hardfork_at(height)`), not from any proposer-supplied field — `BlockHeader` carries no `version` field and no `chain_id` field. Today `Hardfork::Genesis` is the only variant. `ExecutionPayload.version` remains on the wire and MUST equal `6`, but it is a payload-format tag, not the dispatch source. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check; block execution remains authoritative.
+The network uses a single canonical protocol rule set. Protocol-version dispatch is derived from block **height** via chainspec hardfork activation (`hardfork_at(height)`), not from any proposer-supplied field — `BlockHeader` carries no `version` field and no `chain_id` field. Today `Hardfork::Genesis` is the only variant. `ExecutionPayload.version` remains on the wire and MUST equal `6`, but it is a payload-format tag, not the dispatch source. Submit and dry-run do not yet know the final block timestamp, so they MUST use current node time as a best-effort admission check; block execution remains authoritative.
 
 ### 8.3 Empty Blocks
 
@@ -1574,7 +1574,7 @@ Canonical encoding follows these rules:
 4. `map` fields are not used in this protocol.
 5. Unknown fields MUST NOT be present in canonical encodings.
 6. Varint encoding MUST use the minimum number of bytes (no leading zero bytes beyond what the standard encoding requires).
-7. A standard Protocol Buffers encoder MAY be used as a starting point once the above constraints (field ordering, default omission, etc.) are enforced on top of it; conformance vectors are required to confirm byte-exact compatibility, since generic Protocol Buffers libraries do not guarantee canonical output on their own.
+7. Implementations MUST apply rules 1–6 on top of standard Protocol Buffers serialization. Conformance vectors are the authoritative test suite for byte-exact compatibility.
 
 ### B.2 State Value Encoding
 
@@ -1589,7 +1589,7 @@ State values stored under the key schema (Section 6.1) are serialized as JSON us
 - Boolean fields are serialized as JSON `true`/`false`.
 - Fields with a default value MUST be present when writing, not conditionally omitted.
 
-Independent implementations MUST verify exact byte compatibility against conformance vectors before claiming consensus compatibility.
+Conformance vectors are the authoritative test suite for byte-exact compatibility with this encoding.
 
 ### B.3 Block Hash
 
